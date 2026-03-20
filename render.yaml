@@ -1,5 +1,4 @@
 services:
-  # Web server
   - type: web
     name: pdf-system-v2
     env: python
@@ -14,14 +13,9 @@ services:
           name: pdf-redis-v2
           type: redis
           property: connectionString
-      # DATABASE_URL is intentionally not set here.
-      # Default: SQLite (no config needed, works out of the box)
-      # To swap to Postgres: add DATABASE_URL pointing to a Postgres instance.
-      # SQLAlchemy handles both — no code changes required.
       - key: DATABASE_URL
         value: sqlite:///./pdf_store.db
 
-  # Celery worker
   - type: worker
     name: pdf-worker-v2
     env: python
@@ -39,8 +33,8 @@ services:
       - key: DATABASE_URL
         value: sqlite:///./pdf_store.db
 
-  # Redis broker
   - type: redis
     name: pdf-redis-v2
     plan: free
     maxmemoryPolicy: allkeys-lru
+    ipAllowList: []
