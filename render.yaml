@@ -1,0 +1,46 @@
+services:
+  # Web server
+  - type: web
+    name: pdf-system-v2
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: STORAGE_BACKEND
+        value: local
+      - key: REDIS_URL
+        fromService:
+          name: pdf-redis-v2
+          type: redis
+          property: connectionString
+      # DATABASE_URL is intentionally not set here.
+      # Default: SQLite (no config needed, works out of the box)
+      # To swap to Postgres: add DATABASE_URL pointing to a Postgres instance.
+      # SQLAlchemy handles both — no code changes required.
+      - key: DATABASE_URL
+        value: sqlite:///./pdf_store.db
+
+  # Celery worker
+  - type: worker
+    name: pdf-worker-v2
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    envVars:
+      - key: STORAGE_BACKEND
+        value: local
+      - key: REDIS_URL
+        fromService:
+          name: pdf-redis-v2
+          type: redis
+          property: connectionString
+      - key: DATABASE_URL
+        value: sqlite:///./pdf_store.db
+
+  # Redis broker
+  - type: redis
+    name: pdf-redis-v2
+    plan: free
+    maxmemoryPolicy: allkeys-lru

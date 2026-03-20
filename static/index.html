@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF Processing System</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;500&display=swap');
+  :root { --bg:#0d0d0d;--surface:#161616;--border:#2a2a2a;--accent:#f4a900;--text:#e8e8e8;--muted:#666;--success:#3ecf8e;--error:#ff4d4d;--warn:#f4a900; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;min-height:100vh;padding:2rem}
+  h1{font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:1.4rem;color:var(--accent);letter-spacing:.05em;margin-bottom:.25rem}
+  .subtitle{font-size:.8rem;color:var(--muted);font-family:'IBM Plex Mono',monospace;margin-bottom:2.5rem}
+  .panel{background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:1.5rem;margin-bottom:1.5rem;max-width:720px}
+  .panel h2{font-size:.7rem;text-transform:uppercase;letter-spacing:.15em;color:var(--muted);font-family:'IBM Plex Mono',monospace;margin-bottom:1rem}
+  input[type=file],input[type=text]{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:.6rem .8rem;font-family:'IBM Plex Mono',monospace;font-size:.85rem;border-radius:3px;margin-bottom:.75rem;outline:none;transition:border-color .2s}
+  input:focus{border-color:var(--accent)}
+  .btn-row{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
+  button{background:var(--accent);color:#000;border:none;padding:.6rem 1.2rem;font-family:'IBM Plex Mono',monospace;font-size:.85rem;font-weight:600;cursor:pointer;border-radius:3px;transition:opacity .2s}
+  button:hover{opacity:.85}
+  button:disabled{opacity:.3;cursor:not-allowed}
+  button.danger{background:#2a1010;color:var(--error);border:1px solid #4a1a1a}
+  button.danger:hover{background:#3a1515}
+
+  /* Upload progress bar — shows real chunk upload % */
+  .upload-progress{margin:.75rem 0;display:none}
+  .progress-bar{height:4px;background:var(--border);border-radius:2px;overflow:hidden}
+  .progress-fill{height:100%;background:var(--accent);border-radius:2px;width:0%;transition:width .3s}
+  .progress-label{font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--muted);margin-top:.3rem}
+
+  /* Processing status — separate from upload, shown after all chunks land */
+  .processing-status{display:none;margin:.75rem 0;padding:.6rem .8rem;background:#0d0d1a;border:1px solid #2a2a4a;border-radius:3px;font-family:'IBM Plex Mono',monospace;font-size:.75rem;align-items:center;gap:.6rem}
+  .processing-status.visible{display:flex}
+  .spinner{width:12px;height:12px;border:2px solid #2a2a4a;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .processing-text{color:var(--warn)}
+
+  .active-file{font-family:'IBM Plex Mono',monospace;font-size:.75rem;padding:.5rem .75rem;background:#0d1f0d;border:1px solid #1a3a1a;border-radius:3px;color:var(--success);margin-bottom:.75rem;display:none}
+  .log{font-family:'IBM Plex Mono',monospace;font-size:.75rem;color:var(--muted);margin-top:.75rem;max-height:140px;overflow-y:auto;line-height:1.6}
+  .log .ok{color:var(--success)}.log .err{color:var(--error)}.log .warn{color:var(--warn)}
+  .result-card{border:1px solid var(--border);border-radius:3px;padding:.9rem;margin-bottom:.75rem;background:var(--bg)}
+  .result-meta{font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--muted);margin-bottom:.4rem}
+  .result-snippet{font-size:.85rem;line-height:1.6;color:var(--text)}
+  mark{background:rgba(244,169,0,.25);color:var(--accent);border-radius:2px;padding:0 2px}
+</style>
+</head>
+<body>
+
+<h1>// PDF Processing System</h1>
+<p class="subtitle">chunked upload · server reassembly · full-text search</p>
+
+<div class="panel">
+  <h2>Upload PDF</h2>
+  <div class="active-file" id="activeFile"></div>
+  <input type="file" id="fileInput" accept=".pdf">
+  <div class="btn-row">
+    <button id="uploadBtn" onclick="startUpload()">Upload & Index</button>
+    <button class="danger" onclick="clearAll()">Clear index</button>
+  </div>
+
+  <!-- Section 1: real upload progress (chunks sent to server) -->
+  <div class="upload-progress" id="uploadProgress">
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="progress-label" id="progressLabel">Uploading…</div>
+  </div>
+
+  <!-- Section 2: background processing status with spinner -->
+  <!-- Only appears after upload is 100% done -->
+  <!-- Spinner proves it is working, not fake -->
+  <div class="processing-status" id="processingStatus">
+    <div class="spinner" id="spinner"></div>
+    <span class="processing-text" id="processingText">Waiting…</span>
+  </div>
+
+  <div class="log" id="uploadLog"></div>
+</div>
+
+<div class="panel">
+  <h2>Search</h2>
+  <input type="text" id="searchInput" placeholder="Search the indexed PDF…" onkeydown="if(event.key==='Enter')doSearch()">
+  <button onclick="doSearch()">Search</button>
+  <div id="searchResults" style="margin-top:1rem"></div>
+</div>
+
+<script>
+const CHUNK_SIZE  = 5 * 1024 * 1024;
+const CONCURRENCY = 5;
+
+function log(msg, type='') {
+  const el = document.getElementById('uploadLog');
+  el.innerHTML += `<div class="${type}">${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function setUploadProgress(done, total) {
+  const pct = Math.round((done / total) * 100);
+  document.getElementById('progressFill').style.width = pct + '%';
+  document.getElementById('progressLabel').textContent =
+    `uploading chunks: ${done} / ${total}  (${pct}%)`;
+}
+
+function setProcessingStatus(text, done=false) {
+  const el     = document.getElementById('processingStatus');
+  const textEl = document.getElementById('processingText');
+  const spinner = document.getElementById('spinner');
+  el.classList.add('visible');
+  textEl.textContent = text;
+  // hide spinner when fully done
+  spinner.style.display = done ? 'none' : 'block';
+  if (done) textEl.style.color = 'var(--success)';
+}
+
+function hideProcessingStatus() {
+  document.getElementById('processingStatus').classList.remove('visible');
+}
+
+function uid() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random()*16|0;
+    return (c==='x'?r:(r&0x3|0x8)).toString(16);
+  });
+}
+
+function setActiveFile(name) {
+  const el = document.getElementById('activeFile');
+  if (name) { el.textContent = '● indexed: ' + name; el.style.display = 'block'; }
+  else       { el.style.display = 'none'; }
+}
+
+async function startUpload() {
+  const file = document.getElementById('fileInput').files[0];
+  if (!file) { alert('Select a PDF first.'); return; }
+
+  const btn = document.getElementById('uploadBtn');
+  btn.disabled = true;
+  document.getElementById('uploadLog').innerHTML = '';
+  document.getElementById('uploadProgress').style.display = 'block';
+  document.getElementById('progressFill').style.width = '0%';
+  document.getElementById('searchResults').innerHTML = '';
+  hideProcessingStatus();
+  setActiveFile(null);
+
+  const uploadId    = uid();
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+  log(`File: ${file.name}  (${(file.size/1024/1024).toFixed(2)} MB)`);
+  log(`Splitting into ${totalChunks} chunk(s) of 5 MB each…`);
+
+  // Step 1: register session
+  try {
+    const form = new FormData();
+    form.append('upload_id',    uploadId);
+    form.append('filename',     file.name);
+    form.append('total_chunks', totalChunks);
+    const res  = await fetch('/api/upload/start', { method:'POST', body:form });
+    const data = await res.json();
+    if (!res.ok) { log(`✗ Start failed: ${data.detail}`, 'err'); btn.disabled=false; return; }
+    log(`Session created.`);
+  } catch(e) {
+    log(`✗ ${e.message}`, 'err'); btn.disabled=false; return;
+  }
+
+  // Step 2: upload chunks in parallel (5 at a time)
+  let completed = 0;
+  let failed    = 0;
+
+  async function uploadChunk(i) {
+    const blob = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+    const form = new FormData();
+    form.append('upload_id',     uploadId);
+    form.append('passage_index', i);
+    form.append('file',          blob, file.name);
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res  = await fetch('/api/upload/chunk', { method:'POST', body:form });
+        const data = await res.json();
+        if (res.ok) {
+          completed++;
+          setUploadProgress(completed, totalChunks);
+          return;
+        }
+        const errMsg = Array.isArray(data.detail)
+          ? data.detail.map(e => e.loc?.join('.')+': '+e.msg).join(', ')
+          : String(data.detail);
+        log(`✗ chunk ${i} attempt ${attempt+1} [HTTP ${res.status}]: ${errMsg}`, 'err');
+      } catch(e) {
+        log(`✗ chunk ${i} attempt ${attempt+1}: network error`, 'err');
+      }
+    }
+    failed++;
+  }
+
+  for (let i = 0; i < totalChunks; i += CONCURRENCY) {
+    const batch = [];
+    for (let j = i; j < Math.min(i + CONCURRENCY, totalChunks); j++) {
+      batch.push(uploadChunk(j));
+    }
+    await Promise.all(batch);
+  }
+
+  if (failed > 0) {
+    log(`⚠ ${failed} chunk(s) failed to upload`, 'err');
+    btn.disabled = false;
+    return;
+  }
+
+  log(`✓ All ${totalChunks} chunks uploaded.`, 'ok');
+
+  // Step 3: show processing spinner — completely separate from upload bar
+  // Server is now running assembly + indexing in the background.
+  // We poll every second and update the spinner label honestly.
+  setProcessingStatus('Waiting for server to start processing…');
+
+  const statusLabels = {
+    'uploading':  'Server received all chunks, queuing…',
+    'assembling': 'Assembling chunks into complete PDF…',
+    'indexing':   'Extracting and indexing text passages…',
+  };
+
+  let lastStatus = '';
+  for (let attempt = 0; attempt < 120; attempt++) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const res  = await fetch(`/api/upload/status/${uploadId}`);
+      const data = await res.json();
+
+      if (data.status !== lastStatus) {
+        lastStatus = data.status;
+
+        if (data.status === 'indexed') {
+          setProcessingStatus('✓ Indexed — ready to search', true);
+          log(`✓ Done! File is indexed and searchable.`, 'ok');
+          setActiveFile(file.name);
+          break;
+        } else if (data.status === 'failed') {
+          setProcessingStatus('✗ Processing failed', true);
+          document.getElementById('processingText').style.color = 'var(--error)';
+          log(`✗ Server failed to process the PDF`, 'err');
+          break;
+        } else {
+          setProcessingStatus(statusLabels[data.status] || data.status);
+        }
+      }
+    } catch(e) { /* network blip, keep polling */ }
+  }
+
+  btn.disabled = false;
+}
+
+async function clearAll() {
+  if (!confirm('Clear the entire index?')) return;
+  const res  = await fetch('/api/clear', { method:'DELETE' });
+  const data = await res.json();
+  document.getElementById('uploadLog').innerHTML = '';
+  hideProcessingStatus();
+  document.getElementById('uploadProgress').style.display = 'none';
+  log(`Index cleared (${data.chunks_deleted} passages removed)`, 'warn');
+  setActiveFile(null);
+  document.getElementById('searchResults').innerHTML = '';
+}
+
+async function doSearch() {
+  const q = document.getElementById('searchInput').value.trim();
+  if (!q) return;
+  const container = document.getElementById('searchResults');
+  container.innerHTML = '<p style="color:var(--muted);font-size:.8rem;font-family:\'IBM Plex Mono\',monospace">Searching…</p>';
+  try {
+    const res  = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=50`);
+    const data = await res.json();
+    if (!data.results.length) {
+      container.innerHTML = '<p style="color:var(--muted);font-size:.8rem">No results.</p>';
+      return;
+    }
+    const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
+    container.innerHTML = data.results.map(r => `
+      <div class="result-card">
+        <div class="result-meta">${r.filename} · passage ${r.passage_index}</div>
+        <div class="result-snippet">${r.snippet.replace(re,'<mark>$1</mark>')}</div>
+      </div>`).join('');
+  } catch(e) {
+    container.innerHTML = `<p style="color:var(--error);font-size:.8rem">Error: ${e.message}</p>`;
+  }
+}
+</script>
+</body>
+</html>
