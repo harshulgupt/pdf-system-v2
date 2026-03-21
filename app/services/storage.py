@@ -65,11 +65,32 @@ def complete_multipart_upload(r2_key: str, upload_id: str) -> None:
         MultipartUpload={'Parts': parts_formatted}
     )
 
-def download_file_to_disk(r2_key: str, dest_path: str) -> None:
-    """Downloads the completely merged file from B2 directly to disk."""
+def download_file_to_disk(r2_key: str, dest_path: str, max_retries: int = 4) -> None:
+    """Downloads the completely merged file from B2 directly to disk via get_object.
+       By avoiding boto3's s3.transfer manager, we bypass 'HeadObject' authorization 
+       quirks on Backblaze B2, while streaming directly to disk to minimize memory usage.
+    """
+    import time
+    from botocore.exceptions import ClientError
+    
     client = _get_boto3_client()
     settings = get_settings()
-    client.download_file(settings.b2_bucket_name, r2_key, dest_path)
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.get_object(Bucket=settings.b2_bucket_name, Key=r2_key)
+            with open(dest_path, 'wb') as f:
+                for chunk in response['Body'].iter_chunks(chunk_size=8192):
+                    f.write(chunk)
+            return  # Success
+        except ClientError as e:
+            # 403 or 404 can occur briefly if Backblaze B2 is eventually consistent.
+            error_code = e.response.get('Error', {}).get('Code', '')
+            if error_code in ['403', '404', 'NoSuchKey', 'Forbidden']:
+                if attempt < max_retries:
+                    time.sleep(1.5 * attempt)  # 1.5s, 3.0s, 4.5s
+                    continue
+            raise  # Out of retries or a different error
 
 
 def delete_file(r2_key: str) -> None:
