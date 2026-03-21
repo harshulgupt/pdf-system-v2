@@ -85,8 +85,8 @@
   <div class="card">
     <h2>Search</h2>
     <div style="margin-bottom:0.75rem">
-      <label for="upload-id-filter">Limit to upload ID (optional)</label>
-      <input type="text" id="upload-id-filter" placeholder="Paste an upload_id to search one PDF only">
+      <!--label for="upload-id-filter">Limit to upload ID (optional)</label>
+      <input type="text" id="upload-id-filter" placeholder="Paste an upload_id to search one PDF only"-->
     </div>
     <div class="search-row">
       <input type="text" id="search-query" placeholder="Enter search terms…" onkeydown="if(event.key==='Enter')doSearch()">
@@ -313,25 +313,29 @@ async function doSearch() {
       return;
     }
 
-    // Summary bar showing total occurrences
     const summary = `
-      <div style="font-size:0.8rem;color:#57534e;margin-bottom:0.5rem;padding:0.5rem 0.75rem;background:#f5f5f4;border-radius:6px;border:1px solid #e7e5e4">
+      <div style="font-size:0.8rem;color:#57534e;padding:0.5rem 0.75rem;background:#f5f5f4;border-radius:6px;border:1px solid #e7e5e4;margin-bottom:0.5rem">
         Found <strong>${data.total_occurrences.toLocaleString()}</strong> occurrence${data.total_occurrences !== 1 ? 's' : ''}
         across <strong>${data.total_chunks_matched}</strong> section${data.total_chunks_matched !== 1 ? 's' : ''}
-        — showing top ${data.results.length}
       </div>`;
 
-    const cards = data.results.map(r => `
-      <div class="result-card">
-        <div class="result-meta">
-          <strong>${escHtml(r.filename)}</strong> &nbsp;·&nbsp;
-          Section ${r.chunk_index} &nbsp;·&nbsp;
-          <span style="background:#dbeafe;color:#1d4ed8;font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:99px;font-weight:600">
-            ${r.occurrences_in_chunk} hit${r.occurrences_in_chunk !== 1 ? 's' : ''} in this section
-          </span>
-        </div>
-        <div class="result-snippet">${highlight(escHtml(r.snippet), q)}</div>
-      </div>`).join('');
+    const cards = data.results.map(r => {
+      const occurrenceList = r.snippets.map((snippet, idx) => `
+        <div style="padding:0.35rem 0.6rem;margin:0.25rem 0;background:#fff;border-left:3px solid #0284c7;font-size:0.82rem;font-family:monospace;line-height:1.5;white-space:pre-wrap">${highlight(escHtml(snippet), q)}</div>
+      `).join('');
+
+      return `
+        <div class="result-card">
+          <div class="result-meta" style="margin-bottom:0.5rem">
+            <strong>${escHtml(r.filename)}</strong> &nbsp;·&nbsp;
+            Section ${r.chunk_index} &nbsp;·&nbsp;
+            <span style="background:#dbeafe;color:#1d4ed8;font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:99px;font-weight:600">
+              ${r.occurrences_in_chunk} occurrence${r.occurrences_in_chunk !== 1 ? 's' : ''}
+            </span>
+          </div>
+          <div>${occurrenceList}</div>
+        </div>`;
+    }).join('');
 
     resultsEl.innerHTML = summary + cards;
   } catch (e) {

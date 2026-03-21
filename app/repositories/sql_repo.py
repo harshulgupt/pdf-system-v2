@@ -16,6 +16,39 @@ STOP_WORDS = {
     "your", "his", "her", "our", "their"
 }
 
+CONTEXT_CHARS = 60  # characters to show on each side of a match
+
+
+def _extract_all_snippets(full_text: str, query: str) -> list[str]:
+    """Find every occurrence of query and return a small context snippet for each."""
+    snippets = []
+    text_lower = full_text.lower()
+    query_lower = query.lower()
+    query_len = len(query)
+    start = 0
+
+    while True:
+        pos = text_lower.find(query_lower, start)
+        if pos == -1:
+            break
+        snippet_start = max(0, pos - CONTEXT_CHARS)
+        snippet_end = min(len(full_text), pos + query_len + CONTEXT_CHARS)
+        snippet = (
+            ("..." if snippet_start > 0 else "")
+            + full_text[snippet_start:snippet_end]
+            + ("..." if snippet_end < len(full_text) else "")
+        )
+        snippets.append(snippet)
+        start = pos + query_len  # move past this match
+
+    return snippets
+
+
+def _count_occurrences(text: str, query: str) -> int:
+    if not text or not query:
+        return 0
+    return text.lower().count(query.lower())
+
 
 class SQLUploadRepository(AbstractUploadRepository):
 
@@ -69,35 +102,13 @@ class SQLSearchRepository(AbstractSearchRepository):
         )
         self.db.commit()
 
-    def _count_occurrences(self, text: str, query: str) -> int:
-        """Count how many times query appears in text (case-insensitive)."""
-        if not text or not query:
-            return 0
-        return text.lower().count(query.lower())
-
-    def _extract_snippet(self, full_text: str, query: str) -> str:
-        """Extract a snippet around the first occurrence of query."""
-        pos = full_text.lower().find(query.lower())
-        if pos == -1:
-            return full_text[:400]
-        start = max(0, pos - 150)
-        end = min(len(full_text), pos + 400)
-        return (
-            ("..." if start > 0 else "")
-            + full_text[start:end]
-            + ("..." if end < len(full_text) else "")
-        )
-
     def _ilike_search(self, db, query: str, upload_id: Optional[str], limit: int) -> dict:
-        """ILIKE fallback for stop words and short queries."""
-        # Count total occurrences across ALL chunks
         count_sql = """
             SELECT COALESCE(SUM(
                 (LENGTH(c.extracted_text) - LENGTH(REPLACE(LOWER(c.extracted_text), LOWER(:query), '')))
                 / LENGTH(:query)
             ), 0) AS total_occurrences
             FROM pdf_chunks c
-            JOIN pdf_uploads u ON u.id = c.upload_id
             WHERE c.extracted_text ILIKE :pattern
         """
         params_count = {"query": query, "pattern": f"%{query}%"}
@@ -107,14 +118,8 @@ class SQLSearchRepository(AbstractSearchRepository):
 
         total_occurrences = int(db.execute(text(count_sql), params_count).scalar() or 0)
 
-        # Fetch top chunks
         base_sql = """
-            SELECT
-                c.id        AS chunk_id,
-                c.upload_id,
-                c.chunk_index,
-                u.filename,
-                c.extracted_text AS full_text
+            SELECT c.id AS chunk_id, c.upload_id, c.chunk_index, u.filename, c.extracted_text AS full_text
             FROM pdf_chunks c
             JOIN pdf_uploads u ON u.id = c.upload_id
             WHERE c.extracted_text ILIKE :pattern
@@ -129,21 +134,17 @@ class SQLSearchRepository(AbstractSearchRepository):
         results = []
         for row in rows:
             full_text = row.full_text or ""
-            count_in_chunk = self._count_occurrences(full_text, query)
-            snippet = self._extract_snippet(full_text, query)
+            snippets = _extract_all_snippets(full_text, query)
             results.append({
                 "chunk_id": row.chunk_id,
                 "upload_id": row.upload_id,
                 "chunk_index": row.chunk_index,
                 "filename": row.filename,
-                "snippet": snippet,
-                "occurrences_in_chunk": count_in_chunk,
+                "snippets": snippets,
+                "occurrences_in_chunk": len(snippets),
             })
 
-        return {
-            "total_occurrences": total_occurrences,
-            "results": results,
-        }
+        return {"total_occurrences": total_occurrences, "results": results}
 
     def search(self, query: str, upload_id: Optional[str], limit: int) -> dict:
         db = self.db
@@ -157,14 +158,13 @@ class SQLSearchRepository(AbstractSearchRepository):
             if not tsquery_str:
                 return self._ilike_search(db, query, upload_id, limit)
 
-            # Count total occurrences across ALL matching chunks
+            # Total occurrence count across all matching chunks
             count_sql = """
                 SELECT COALESCE(SUM(
                     (LENGTH(c.extracted_text) - LENGTH(REPLACE(LOWER(c.extracted_text), LOWER(:query), '')))
                     / NULLIF(LENGTH(:query), 0)
                 ), 0) AS total_occurrences
-                FROM pdf_chunks c
-                JOIN pdf_uploads u ON u.id = c.upload_id,
+                FROM pdf_chunks c,
                      to_tsquery('english', :tsquery) q
                 WHERE to_tsvector('english', c.extracted_text) @@ q
             """
@@ -175,14 +175,10 @@ class SQLSearchRepository(AbstractSearchRepository):
 
             total_occurrences = int(db.execute(text(count_sql), params_count).scalar() or 0)
 
-            # Fetch top 10 chunks by relevance
             base_sql = """
                 SELECT
-                    c.id            AS chunk_id,
-                    c.upload_id,
-                    c.chunk_index,
-                    u.filename,
-                    c.extracted_text AS full_text,
+                    c.id AS chunk_id, c.upload_id, c.chunk_index,
+                    u.filename, c.extracted_text AS full_text,
                     ts_rank(to_tsvector('english', c.extracted_text), q) AS rank
                 FROM pdf_chunks c
                 JOIN pdf_uploads u ON u.id = c.upload_id,
@@ -199,21 +195,17 @@ class SQLSearchRepository(AbstractSearchRepository):
             results = []
             for row in rows:
                 full_text = row.full_text or ""
-                count_in_chunk = self._count_occurrences(full_text, fts_words[0])
-                snippet = self._extract_snippet(full_text, fts_words[0])
+                snippets = _extract_all_snippets(full_text, fts_words[0])
                 results.append({
                     "chunk_id": row.chunk_id,
                     "upload_id": row.upload_id,
                     "chunk_index": row.chunk_index,
                     "filename": row.filename,
-                    "snippet": snippet,
-                    "occurrences_in_chunk": count_in_chunk,
+                    "snippets": snippets,
+                    "occurrences_in_chunk": len(snippets),
                 })
 
-            return {
-                "total_occurrences": total_occurrences,
-                "results": results,
-            }
+            return {"total_occurrences": total_occurrences, "results": results}
 
         # SQLite fallback
         q = self.db.query(PDFChunk).join(PDFUpload)
@@ -222,23 +214,19 @@ class SQLSearchRepository(AbstractSearchRepository):
         q = q.filter(PDFChunk.extracted_text.ilike(f"%{query}%")).limit(limit)
         rows_orm = q.all()
 
-        total_occurrences = sum(
-            self._count_occurrences(r.extracted_text or "", query) for r in rows_orm
-        )
+        total_occurrences = sum(_count_occurrences(r.extracted_text or "", query) for r in rows_orm)
 
         results = []
         for r in rows_orm:
             full_text = r.extracted_text or ""
+            snippets = _extract_all_snippets(full_text, query)
             results.append({
                 "chunk_id": r.id,
                 "upload_id": r.upload_id,
                 "chunk_index": r.chunk_index,
                 "filename": r.upload.filename,
-                "snippet": self._extract_snippet(full_text, query),
-                "occurrences_in_chunk": self._count_occurrences(full_text, query),
+                "snippets": snippets,
+                "occurrences_in_chunk": len(snippets),
             })
 
-        return {
-            "total_occurrences": total_occurrences,
-            "results": results,
-        }
+        return {"total_occurrences": total_occurrences, "results": results}
