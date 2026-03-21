@@ -253,7 +253,10 @@ async function startUpload() {
     if (!res.ok) throw new Error(await res.text());
     initData = await res.json();
     log(`Initiated — upload ID: ${initData.upload_id}`, 'ok');
-    document.getElementById('upload-id-filter').value = initData.upload_id;
+    const filterInput = document.getElementById('upload-id-filter');
+    if (filterInput) {
+        filterInput.value = initData.upload_id;
+    }
   } catch (e) {
     log(`Init failed: ${e.message}`, 'err');
     setBadge('failed', 'red');
