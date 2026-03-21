@@ -1,6 +1,5 @@
 import logging
 import traceback
-import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -9,61 +8,16 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.api.routes import upload, search
-from app.db.database import init_db, SessionLocal
-from app.models.models import PDFUpload, UploadStatus
-from app.repositories.sql_repo import SQLUploadRepository, SQLSearchRepository
-from app.services.upload_service import UploadService
-
+from app.db.database import init_db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def resume_interrupted_tasks():
-    logger.info("Checking for interrupted upload tasks...")
-    db = SessionLocal()
-    try:
-        # Find uploads that were stuck in 'processing' state when the server crashed/restarted
-        interrupted = db.query(PDFUpload).filter(PDFUpload.status == UploadStatus.processing).all()
-        if not interrupted:
-            logger.info("No interrupted tasks found.")
-            return
-
-        logger.info(f"Found {len(interrupted)} interrupted tasks. Resuming...")
-
-        for upload in interrupted:
-            logger.info(f"Resuming task for upload: {upload.id}")
-            # Run in a background thread to not block the asyncio event loop startup
-            loop = asyncio.get_running_loop()
-            
-            # Create a completely isolated DB session to prevent "concurrent operations" crash
-            def run_job(u_id):
-                local_db = SessionLocal()
-                try:
-                    upload_repo = SQLUploadRepository(local_db)
-                    search_repo = SQLSearchRepository(local_db)
-                    service = UploadService(upload_repo, search_repo)
-                    service._process_upload_async(u_id)
-                except Exception as ex:
-                    logger.error(f"Job failed: {ex}")
-                finally:
-                    local_db.close()
-                    
-            loop.run_in_executor(None, run_job, upload.id)
-            
-    except Exception as e:
-        logger.error(f"Error resuming tasks: {e}")
-    finally:
-        db.close()
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    # Robust Queue Recovery: Survive container restarts
-    resume_interrupted_tasks()
     yield
-
 
 
 app = FastAPI(title="PDF Processing System", version="2.0.0", lifespan=lifespan)

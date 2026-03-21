@@ -248,7 +248,7 @@ async function startUpload() {
     const res = await fetch(`${API}/api/upload/init`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: file.name, file_size_bytes: file.size, total_chunks: totalChunks }),
+      body: JSON.stringify({ filename: file.name, total_chunks: totalChunks }),
     });
     if (!res.ok) throw new Error(await res.text());
     initData = await res.json();

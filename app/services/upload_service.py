@@ -83,8 +83,6 @@ class UploadService:
         tmp_path = f"/tmp/{upload.id}.pdf"
         r2_key = f"uploads/{upload.id}.pdf"
         
-        # We must use download_file_to_disk. Streaming via S3File triggers thousands of API GET limits
-        # on Backblaze due to pypdf's scattered XRef structure byte-seeking!
         download_file_to_disk(r2_key, tmp_path)
         
         if not os.path.exists(tmp_path):
@@ -124,7 +122,6 @@ class UploadService:
             self.search_repo.save_extracted_text(chunk_record.id, text)
             
         try:
-            import os
             os.remove(tmp_path)
         except Exception:
             pass
