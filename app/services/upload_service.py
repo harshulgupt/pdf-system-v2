@@ -5,7 +5,7 @@ from fastapi import BackgroundTasks
 import pypdf
 from app.models.models import UploadStatus
 from app.repositories.base import AbstractUploadRepository, AbstractSearchRepository
-from app.services.storage import initiate_multipart_upload, generate_presigned_part_url, complete_multipart_upload, download_file_to_disk
+from app.services.storage import initiate_multipart_upload, generate_presigned_part_url, complete_multipart_upload, get_s3_file
 
 
 
@@ -80,16 +80,15 @@ class UploadService:
     def _process_upload(self, upload) -> None:
         chunks = sorted(upload.chunks, key=lambda c: c.chunk_index)
         
-        tmp_path = f"/tmp/{upload.id}.pdf"
         r2_key = f"uploads/{upload.id}.pdf"
         
-        download_file_to_disk(r2_key, tmp_path)
-        
-        if not os.path.exists(tmp_path):
-            raise RuntimeError("Downloaded PDF file not found")
-
-        reader = pypdf.PdfReader(tmp_path)
-        total_pages = len(reader.pages)
+        try:
+            # Stream directly from S3/B2 using our file-like wrapper to avoid OOM
+            s3_file = get_s3_file(r2_key)
+            reader = pypdf.PdfReader(s3_file)
+            total_pages = len(reader.pages)
+        except Exception as e:
+            raise RuntimeError(f"Could not read PDF stream from S3: {e}")
 
         if total_pages == 0:
             raise RuntimeError("PDF has no pages or could not be read")
@@ -120,11 +119,6 @@ class UploadService:
             text = text[:500_000]
 
             self.search_repo.save_extracted_text(chunk_record.id, text)
-            
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
 
     def get_status(self, upload_id: str) -> dict:
         upload = self.upload_repo.get_upload(upload_id)

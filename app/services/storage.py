@@ -76,3 +76,54 @@ def delete_file(r2_key: str) -> None:
     client = _get_boto3_client()
     settings = get_settings()
     client.delete_object(Bucket=settings.b2_bucket_name, Key=r2_key)
+
+
+class S3File(io.RawIOBase):
+    """File-like object that streams byte ranges directly from S3/B2, preventing OOMs for large files."""
+    def __init__(self, bucket: str, key: str, client):
+        self.bucket = bucket
+        self.key = key
+        self.client = client
+        self.position = 0
+        response = self.client.head_object(Bucket=self.bucket, Key=self.key)
+        self.size = response['ContentLength']
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        if whence == io.SEEK_SET:
+            self.position = offset
+        elif whence == io.SEEK_CUR:
+            self.position += offset
+        elif whence == io.SEEK_END:
+            self.position = self.size + offset
+        
+        self.position = max(0, min(self.position, self.size))
+        return self.position
+
+    def tell(self):
+        return self.position
+
+    def read(self, size=-1):
+        if self.position >= self.size:
+            return b""
+        
+        if size == -1:
+            end = self.size - 1
+        else:
+            end = min(self.position + size - 1, self.size - 1)
+        
+        if end < self.position:
+            return b""
+            
+        range_header = f"bytes={self.position}-{end}"
+        response = self.client.get_object(Bucket=self.bucket, Key=self.key, Range=range_header)
+        data = response['Body'].read()
+        self.position += len(data)
+        return data
+
+    def readable(self): return True
+    def seekable(self): return True
+
+def get_s3_file(r2_key: str):
+    client = _get_boto3_client()
+    settings = get_settings()
+    return S3File(settings.b2_bucket_name, r2_key, client)

@@ -8,6 +8,7 @@ router = APIRouter(prefix="/upload", tags=["upload"])
 
 class InitUploadRequest(BaseModel):
     filename: str = Field(..., min_length=1, max_length=255)
+    file_size_bytes: int = Field(..., gt=0, le=25 * 1024 * 1024 * 1024)  # Max 25GB
     total_chunks: int = Field(..., gt=0, le=10000)
 
 class ConfirmChunkRequest(BaseModel):
