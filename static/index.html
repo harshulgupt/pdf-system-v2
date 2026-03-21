@@ -85,8 +85,8 @@
   <div class="card">
     <h2>Search</h2>
     <div style="margin-bottom:0.75rem">
-      <!--label for="upload-id-filter">Limit to upload ID (optional)</label>
-      <input type="text" id="upload-id-filter" placeholder="Paste an upload_id to search one PDF only"-->
+      <label for="upload-id-filter">Limit to upload ID (optional)</label>
+      <input type="text" id="upload-id-filter" placeholder="Paste an upload_id to search one PDF only">
     </div>
     <div class="search-row">
       <input type="text" id="search-query" placeholder="Enter search terms…" onkeydown="if(event.key==='Enter')doSearch()">
@@ -253,10 +253,7 @@ async function startUpload() {
     if (!res.ok) throw new Error(await res.text());
     initData = await res.json();
     log(`Initiated — upload ID: ${initData.upload_id}`, 'ok');
-    const filterInput = document.getElementById('upload-id-filter');
-    if (filterInput) {
-        filterInput.value = initData.upload_id;
-    }
+    document.getElementById('upload-id-filter').value = initData.upload_id;
   } catch (e) {
     log(`Init failed: ${e.message}`, 'err');
     setBadge('failed', 'red');
