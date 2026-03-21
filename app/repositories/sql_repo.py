@@ -62,10 +62,9 @@ class SQLSearchRepository(AbstractSearchRepository):
         self.db = db
 
     def save_extracted_text(self, chunk_id: str, text: str) -> None:
-        chunk = self.db.query(PDFChunk).filter(PDFChunk.id == chunk_id).first()
-        if not chunk:
-            raise ValueError(f"Chunk {chunk_id} not found")
-        chunk.extracted_text = text
+        self.db.query(PDFChunk).filter(PDFChunk.id == chunk_id).update(
+            {"extracted_text": text}
+        )
         self.db.commit()
 
     def search(self, query: str, upload_id: Optional[str], limit: int) -> list[dict]:
