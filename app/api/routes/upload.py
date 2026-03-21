@@ -11,6 +11,9 @@ from app.services.upload_service import UploadService
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 
+# 50 MB hard limit per chunk to prevent memory exhaustion
+MAX_CHUNK_BYTES = 50 * 1024 * 1024
+
 
 class InitUploadRequest(BaseModel):
     filename: str = Field(..., min_length=1, max_length=255)
@@ -31,7 +34,7 @@ def init_upload(
 ):
     """
     Step 1 — client calls this before uploading anything.
-    Returns upload_id and r2_key for each chunk.
+    Returns upload_id and chunk_key for each chunk.
     """
     if not body.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
@@ -41,7 +44,7 @@ def init_upload(
 @router.post("/chunk")
 def upload_chunk_proxy(
     file: UploadFile = File(...),
-    r2_key: str = Form(...),
+    chunk_key: str = Form(...),
     upload_id: str = Form(...),
     chunk_index: int = Form(...),
     service: UploadService = Depends(_get_service),
@@ -51,10 +54,15 @@ def upload_chunk_proxy(
     We forward the bytes to B2 and confirm receipt in the DB.
     This proxy approach avoids CORS issues with direct browser→B2 uploads.
     """
+    data = file.file.read(MAX_CHUNK_BYTES + 1)
+    if len(data) > MAX_CHUNK_BYTES:
+        raise HTTPException(status_code=413, detail="Chunk exceeds 50 MB limit")
+
     try:
-        data = file.file.read()
-        service.upload_chunk(r2_key, data)
+        service.upload_chunk(chunk_key, data)
         return service.confirm_chunk(upload_id, chunk_index)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -5,11 +5,10 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     database_url: str = "sqlite:///./pdf_store.db"
 
-    r2_account_id: str = ""
-    r2_access_key_id: str = ""
-    r2_secret_access_key: str = ""
-    r2_bucket_name: str = "pdf-chunks"
-    r2_public_url: str = ""
+    b2_access_key_id: str = ""
+    b2_secret_access_key: str = ""
+    b2_endpoint_url: str = ""   # e.g. https://s3.us-west-004.backblazeb2.com
+    b2_bucket_name: str = "pdf-chunks"
 
     secret_key: str = "dev-only-secret"
 

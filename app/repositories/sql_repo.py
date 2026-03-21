@@ -32,6 +32,8 @@ class SQLUploadRepository(AbstractUploadRepository):
 
     def increment_received_chunks(self, upload_id: str) -> PDFUpload:
         upload = self.get_upload(upload_id)
+        if not upload:
+            raise ValueError(f"Upload {upload_id} not found")
         upload.received_chunks += 1
         self.db.commit()
         self.db.refresh(upload)
@@ -39,13 +41,15 @@ class SQLUploadRepository(AbstractUploadRepository):
 
     def set_status(self, upload_id: str, status: UploadStatus) -> PDFUpload:
         upload = self.get_upload(upload_id)
+        if not upload:
+            raise ValueError(f"Upload {upload_id} not found")
         upload.status = status
         self.db.commit()
         self.db.refresh(upload)
         return upload
 
-    def save_chunk_record(self, upload_id: str, chunk_index: int, r2_key: str) -> PDFChunk:
-        chunk = PDFChunk(upload_id=upload_id, chunk_index=chunk_index, r2_key=r2_key)
+    def save_chunk_record(self, upload_id: str, chunk_index: int, chunk_key: str) -> PDFChunk:
+        chunk = PDFChunk(upload_id=upload_id, chunk_index=chunk_index, r2_key=chunk_key)
         self.db.add(chunk)
         self.db.commit()
         self.db.refresh(chunk)
@@ -59,6 +63,8 @@ class SQLSearchRepository(AbstractSearchRepository):
 
     def save_extracted_text(self, chunk_id: str, text: str) -> None:
         chunk = self.db.query(PDFChunk).filter(PDFChunk.id == chunk_id).first()
+        if not chunk:
+            raise ValueError(f"Chunk {chunk_id} not found")
         chunk.extracted_text = text
         self.db.commit()
 
@@ -66,15 +72,11 @@ class SQLSearchRepository(AbstractSearchRepository):
         """
         Postgres path: uses GIN full-text index (fast, scales to millions of chunks).
         SQLite fallback: LIKE (dev only — never use in prod on large data).
-
-        Trade-off documented here:
-          Postgres FTS — fast, ranked, handles 20 GB corpus well.
-          Vector DB (Pinecone/pgvector) — needed for semantic/embedding search.
-          This implementation is FTS; swap search_repo for vector search if needed.
         """
         db = self.db
 
-        is_postgres = "postgresql" in str(db.bind.url) if hasattr(db, 'bind') and db.bind else False
+        # Detect postgres vs sqlite via the engine URL
+        is_postgres = "postgresql" in str(db.get_bind().url)
 
         if is_postgres:
             base_sql = """
@@ -96,31 +98,31 @@ class SQLSearchRepository(AbstractSearchRepository):
                 params["upload_id"] = upload_id
             base_sql += " ORDER BY rank DESC LIMIT :limit"
             rows = db.execute(text(base_sql), params).fetchall()
-        else:
-            # SQLite fallback — fine for dev, not for prod
-            q = self.db.query(PDFChunk).join(PDFUpload)
-            if upload_id:
-                q = q.filter(PDFChunk.upload_id == upload_id)
-            q = q.filter(PDFChunk.extracted_text.ilike(f"%{query}%")).limit(limit)
-            rows_orm = q.all()
+
             return [
                 {
-                    "chunk_id": r.id,
-                    "upload_id": r.upload_id,
-                    "chunk_index": r.chunk_index,
-                    "filename": r.upload.filename,
-                    "snippet": r.extracted_text[:300],
+                    "chunk_id": row.chunk_id,
+                    "upload_id": row.upload_id,
+                    "chunk_index": row.chunk_index,
+                    "filename": row.filename,
+                    "snippet": row.snippet,
                 }
-                for r in rows_orm
+                for row in rows
             ]
 
+        # SQLite fallback — fine for dev, not for prod
+        q = self.db.query(PDFChunk).join(PDFUpload)
+        if upload_id:
+            q = q.filter(PDFChunk.upload_id == upload_id)
+        q = q.filter(PDFChunk.extracted_text.ilike(f"%{query}%")).limit(limit)
+        rows_orm = q.all()
         return [
             {
-                "chunk_id": row.chunk_id,
-                "upload_id": row.upload_id,
-                "chunk_index": row.chunk_index,
-                "filename": row.filename,
-                "snippet": row.snippet,
+                "chunk_id": r.id,
+                "upload_id": r.upload_id,
+                "chunk_index": r.chunk_index,
+                "filename": r.upload.filename,
+                "snippet": r.extracted_text[:300],
             }
-            for row in rows
+            for r in rows_orm
         ]

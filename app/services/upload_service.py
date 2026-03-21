@@ -2,7 +2,7 @@
 Upload service — owns the write path business logic.
 
 Flow:
-  1. init_upload()      → creates DB record, returns upload_id + r2_keys per chunk
+  1. init_upload()      → creates DB record, returns upload_id + chunk_key per chunk
   2. upload_chunk()     → receives raw bytes from browser, forwards to B2
   3. confirm_chunk()    → marks chunk as received in DB
   4. complete_upload()  → triggers text extraction from B2
@@ -28,29 +28,32 @@ class UploadService:
 
     def init_upload(self, filename: str, total_chunks: int) -> dict:
         """
-        Creates the upload record and returns the r2_key for each chunk.
-        Browser will POST each chunk to /api/upload/chunk with its r2_key.
+        Creates the upload record and returns the storage key for each chunk.
+        Browser will POST each chunk to /api/upload/chunk with its chunk_key.
         """
         upload = self.upload_repo.create_upload(filename, total_chunks)
         chunks = []
 
         for i in range(total_chunks):
-            r2_key = f"uploads/{upload.id}/chunk_{i:06d}"
-            chunk_record = self.upload_repo.save_chunk_record(upload.id, i, r2_key)
+            chunk_key = f"uploads/{upload.id}/chunk_{i:06d}"
+            chunk_record = self.upload_repo.save_chunk_record(upload.id, i, chunk_key)
             chunks.append({
                 "chunk_index": i,
-                "r2_key": r2_key,
+                "chunk_key": chunk_key,
                 "chunk_record_id": chunk_record.id,
             })
 
         self.upload_repo.set_status(upload.id, UploadStatus.uploading)
         return {"upload_id": upload.id, "chunks": chunks}
 
-    def upload_chunk(self, r2_key: str, data: bytes) -> None:
+    def upload_chunk(self, chunk_key: str, data: bytes) -> None:
         """Forwards raw chunk bytes to B2."""
-        upload_bytes(r2_key, data)
+        upload_bytes(chunk_key, data)
 
     def confirm_chunk(self, upload_id: str, chunk_index: int) -> dict:
+        upload = self.upload_repo.get_upload(upload_id)
+        if not upload:
+            raise ValueError(f"Upload {upload_id} not found")
         upload = self.upload_repo.increment_received_chunks(upload_id)
         return {
             "upload_id": upload_id,
@@ -63,6 +66,11 @@ class UploadService:
         upload = self.upload_repo.get_upload(upload_id)
         if not upload:
             raise ValueError(f"Upload {upload_id} not found")
+
+        if upload.received_chunks < upload.total_chunks:
+            raise RuntimeError(
+                f"Not all chunks received: {upload.received_chunks}/{upload.total_chunks}"
+            )
 
         self.upload_repo.set_status(upload_id, UploadStatus.processing)
         try:
@@ -79,6 +87,10 @@ class UploadService:
 
         reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(reader.pages)
+
+        if total_pages == 0:
+            raise RuntimeError("PDF has no pages or could not be read")
+
         pages_per_chunk = max(1, total_pages // max(len(chunks), 1))
 
         for chunk_record in chunks:

@@ -24,20 +24,19 @@ from app.config import get_settings
 
 def _get_boto3_client():
     settings = get_settings()
-    endpoint = settings.r2_public_url.rstrip("/")
+    endpoint = settings.b2_endpoint_url.strip()   # strip any accidental whitespace/newlines
     host     = endpoint.replace("https://", "").replace("http://", "")
 
-    if "backblazeb2.com" in host:
-        match  = re.match(r"s3\.([^.]+)\.backblazeb2\.com", host)
-        region = match.group(1) if match else "us-west-004"
-    else:
-        region = "auto"
+    # Derive region from the Backblaze endpoint hostname
+    # e.g. s3.us-west-004.backblazeb2.com -> us-west-004
+    match  = re.match(r"s3\.([^.]+)\.backblazeb2\.com", host)
+    region = match.group(1) if match else "us-west-004"
 
     return boto3.client(
         "s3",
         endpoint_url=endpoint,
-        aws_access_key_id=settings.r2_access_key_id,
-        aws_secret_access_key=settings.r2_secret_access_key,
+        aws_access_key_id=settings.b2_access_key_id.strip(),
+        aws_secret_access_key=settings.b2_secret_access_key.strip(),
         config=Config(
             signature_version="s3v4",
             s3={"addressing_style": "path"},
@@ -54,7 +53,7 @@ def upload_bytes(r2_key: str, data: bytes) -> None:
     client   = _get_boto3_client()
     settings = get_settings()
     client.put_object(
-        Bucket=settings.r2_bucket_name,
+        Bucket=settings.b2_bucket_name,
         Key=r2_key,
         Body=data,
     )
@@ -65,7 +64,7 @@ def download_chunk_bytes(r2_key: str) -> bytes:
     client   = _get_boto3_client()
     settings = get_settings()
     buf = io.BytesIO()
-    client.download_fileobj(settings.r2_bucket_name, r2_key, buf)
+    client.download_fileobj(settings.b2_bucket_name, r2_key, buf)
     buf.seek(0)
     return buf.read()
 
@@ -73,4 +72,4 @@ def download_chunk_bytes(r2_key: str) -> bytes:
 def delete_chunk(r2_key: str) -> None:
     client   = _get_boto3_client()
     settings = get_settings()
-    client.delete_object(Bucket=settings.r2_bucket_name, Key=r2_key)
+    client.delete_object(Bucket=settings.b2_bucket_name, Key=r2_key)
