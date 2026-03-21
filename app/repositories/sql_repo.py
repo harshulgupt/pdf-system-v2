@@ -1,11 +1,3 @@
-"""
-SQL (Postgres / SQLite) implementation of the repository interfaces.
-
-To swap to MongoDB or Pinecone:
-  1. Create app/repositories/mongo_repo.py implementing the same ABCs.
-  2. Change get_upload_repo() and get_search_repo() in app/dependencies.py.
-  That's the only change needed outside this file.
-"""
 from typing import Optional
 
 from sqlalchemy import text
@@ -68,30 +60,64 @@ class SQLSearchRepository(AbstractSearchRepository):
         self.db.commit()
 
     def search(self, query: str, upload_id: Optional[str], limit: int) -> list[dict]:
-        """
-        Postgres path: uses GIN full-text index (fast, scales to millions of chunks).
-        SQLite fallback: LIKE (dev only — never use in prod on large data).
-        """
         db = self.db
-
-        # Detect postgres vs sqlite via the engine URL
         is_postgres = "postgresql" in str(db.get_bind().url)
 
         if is_postgres:
+            # Filter out stop words and non-alpha tokens for tsquery
+            words = [w for w in query.split() if w.isalpha()]
+            tsquery_str = " & ".join(words)
+
+            # If all words are stop words, fall back to ILIKE
+            if not tsquery_str:
+                base_sql = """
+                    SELECT
+                        c.id            AS chunk_id,
+                        c.upload_id,
+                        c.chunk_index,
+                        u.filename,
+                        substring(c.extracted_text, 1, 300) AS snippet
+                    FROM pdf_chunks c
+                    JOIN pdf_uploads u ON u.id = c.upload_id
+                    WHERE c.extracted_text ILIKE :pattern
+                """
+                params = {"pattern": f"%{query}%", "limit": limit}
+                if upload_id:
+                    base_sql += " AND c.upload_id = :upload_id"
+                    params["upload_id"] = upload_id
+                base_sql += " LIMIT :limit"
+                rows = db.execute(text(base_sql), params).fetchall()
+                return [
+                    {
+                        "chunk_id": row.chunk_id,
+                        "upload_id": row.upload_id,
+                        "chunk_index": row.chunk_index,
+                        "filename": row.filename,
+                        "snippet": row.snippet,
+                    }
+                    for row in rows
+                ]
+
+            # Normal FTS path
             base_sql = """
                 SELECT
                     c.id            AS chunk_id,
                     c.upload_id,
                     c.chunk_index,
                     u.filename,
-                    ts_headline('english', c.extracted_text, q, 'MaxWords=50, MinWords=20') AS snippet,
+                    ts_headline(
+                        'english',
+                        c.extracted_text,
+                        q,
+                        'MaxWords=60, MinWords=20, MaxFragments=3, FragmentDelimiter=" ... "'
+                    ) AS snippet,
                     ts_rank(to_tsvector('english', c.extracted_text), q) AS rank
                 FROM pdf_chunks c
                 JOIN pdf_uploads u ON u.id = c.upload_id,
                      to_tsquery('english', :tsquery) q
                 WHERE to_tsvector('english', c.extracted_text) @@ q
             """
-            params = {"tsquery": " & ".join(query.split()), "limit": limit}
+            params = {"tsquery": tsquery_str, "limit": limit}
             if upload_id:
                 base_sql += " AND c.upload_id = :upload_id"
                 params["upload_id"] = upload_id
@@ -109,19 +135,34 @@ class SQLSearchRepository(AbstractSearchRepository):
                 for row in rows
             ]
 
-        # SQLite fallback — fine for dev, not for prod
+        # SQLite fallback
         q = self.db.query(PDFChunk).join(PDFUpload)
         if upload_id:
             q = q.filter(PDFChunk.upload_id == upload_id)
         q = q.filter(PDFChunk.extracted_text.ilike(f"%{query}%")).limit(limit)
         rows_orm = q.all()
-        return [
-            {
+
+        results = []
+        for r in rows_orm:
+            text_lower = r.extracted_text.lower()
+            query_lower = query.lower()
+            pos = text_lower.find(query_lower)
+            if pos == -1:
+                snippet = r.extracted_text[:300]
+            else:
+                start = max(0, pos - 100)
+                end = min(len(r.extracted_text), pos + len(query) + 200)
+                snippet = (
+                    ("..." if start > 0 else "")
+                    + r.extracted_text[start:end]
+                    + ("..." if end < len(r.extracted_text) else "")
+                )
+            results.append({
                 "chunk_id": r.id,
                 "upload_id": r.upload_id,
                 "chunk_index": r.chunk_index,
                 "filename": r.upload.filename,
-                "snippet": r.extracted_text[:300],
-            }
-            for r in rows_orm
-        ]
+                "snippet": snippet,
+            })
+
+        return results

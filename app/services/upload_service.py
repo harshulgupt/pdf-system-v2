@@ -4,6 +4,7 @@ from app.models.models import UploadStatus
 from app.repositories.base import AbstractUploadRepository, AbstractSearchRepository
 from app.services.storage import download_chunk_bytes, generate_presigned_upload_url
 
+
 class UploadService:
     def __init__(self, upload_repo: AbstractUploadRepository, search_repo: AbstractSearchRepository):
         self.upload_repo = upload_repo
@@ -83,8 +84,12 @@ class UploadService:
                         raw_parts.append("")
                 text = "\n".join(raw_parts)
 
+            # Clean text for Postgres
             text = text.replace("\x00", "")
-            text = "".join(ch for ch in text if ch == "\n" or ch == "\t" or ord(ch) >= 32)
+            text = "".join(
+                ch for ch in text
+                if ch == "\n" or ch == "\t" or ord(ch) >= 32
+            )
             text = text[:500_000]
 
             self.search_repo.save_extracted_text(chunk_record.id, text)
