@@ -85,7 +85,19 @@ class S3File(io.RawIOBase):
         self.key = key
         self.client = client
         self.position = 0
-        response = self.client.head_object(Bucket=self.bucket, Key=self.key)
+        
+        # Backblaze B2 often presents eventual consistency delays immediately after multipart upload
+        import time
+        response = None
+        for attempt in range(5):
+            try:
+                response = self.client.head_object(Bucket=self.bucket, Key=self.key)
+                break
+            except Exception as e:
+                if attempt == 4:
+                    raise RuntimeError(f"HeadObject failed after 5 attempts: {e}")
+                time.sleep(1.0 + attempt * 0.5)
+                
         self.size = response['ContentLength']
 
     def seek(self, offset, whence=io.SEEK_SET):
