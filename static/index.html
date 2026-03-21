@@ -174,31 +174,29 @@ async function uploadChunksParallel(file, initData, CHUNK_SIZE, CONCURRENCY) {
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        // PUT directly to R2 — API server never touches these bytes
-        const r2Res = await fetch(chunkInfo.upload_url, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: slice,
-        });
-        if (!r2Res.ok) throw new Error(`R2 HTTP ${r2Res.status}`);
+        // POST chunk to our API server as multipart form data.
+        // Server forwards bytes to B2 — avoids CORS issues with direct B2 upload.
+        const formData = new FormData();
+        formData.append('file', new Blob([slice], { type: 'application/octet-stream' }), 'chunk');
+        formData.append('r2_key', chunkInfo.r2_key);
+        formData.append('upload_id', uploadId);
+        formData.append('chunk_index', String(i));
 
-        // Tell our backend this chunk landed in R2
-        const confirmRes = await fetch(
-          `${API}/api/upload/${uploadId}/chunk/${i}/confirm`,
-          { method: 'POST' }
-        );
-        if (!confirmRes.ok) throw new Error(`Confirm HTTP ${confirmRes.status}`);
+        const res = await fetch(`${API}/api/upload/chunk`, {
+          method: 'POST',
+          body: formData,
+        });
+        if (!res.ok) throw new Error(`Upload HTTP ${res.status}: ${await res.text()}`);
 
         done++;
         setProgress(done, totalChunks, chunkBytes);
-        return; // success — exit retry loop
+        return;
       } catch (e) {
         if (attempt === MAX_RETRIES) {
           failed = true;
           failureReason = `Chunk ${i} failed after ${MAX_RETRIES} attempts: ${e.message}`;
           throw e;
         }
-        // Exponential backoff: 500ms, 1000ms, 2000ms …
         const wait = 500 * Math.pow(2, attempt - 1);
         log(`Chunk ${i} attempt ${attempt} failed (${e.message}), retrying in ${wait}ms…`);
         await new Promise(r => setTimeout(r, wait));

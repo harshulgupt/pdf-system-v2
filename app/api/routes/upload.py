@@ -2,7 +2,7 @@
 Upload controller — thin layer. Validates input, calls service, returns response.
 No business logic here. No direct DB calls.
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from pydantic import BaseModel, Field
 
 from app.dependencies import get_upload_repo, get_search_repo
@@ -31,27 +31,32 @@ def init_upload(
 ):
     """
     Step 1 — client calls this before uploading anything.
-    Returns upload_id and one presigned PUT URL per chunk.
-    Client uploads each chunk directly to R2 using those URLs.
+    Returns upload_id and r2_key for each chunk.
     """
     if not body.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
     return service.init_upload(body.filename, body.total_chunks)
 
 
-@router.post("/{upload_id}/chunk/{chunk_index}/confirm")
-def confirm_chunk(
-    upload_id: str,
-    chunk_index: int,
+@router.post("/chunk")
+def upload_chunk_proxy(
+    file: UploadFile = File(...),
+    r2_key: str = Form(...),
+    upload_id: str = Form(...),
+    chunk_index: int = Form(...),
     service: UploadService = Depends(_get_service),
 ):
     """
-    Step 2 — client calls after successfully PUTting each chunk to R2.
+    Step 2 — browser POSTs each chunk here as multipart form data.
+    We forward the bytes to B2 and confirm receipt in the DB.
+    This proxy approach avoids CORS issues with direct browser→B2 uploads.
     """
     try:
+        data = file.file.read()
+        service.upload_chunk(r2_key, data)
         return service.confirm_chunk(upload_id, chunk_index)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/{upload_id}/complete")
@@ -60,7 +65,7 @@ def complete_upload(
     service: UploadService = Depends(_get_service),
 ):
     """
-    Step 3 — client calls after all chunks are confirmed.
+    Step 3 — client calls after all chunks are uploaded.
     Triggers text extraction and indexing.
     """
     try:

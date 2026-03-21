@@ -1,82 +1,25 @@
-import hashlib
-import hmac
+"""
+Storage service — handles all interaction with Backblaze B2 / S3-compatible storage.
+
+Chunks are uploaded via our API server (proxy approach) to avoid browser CORS
+restrictions on direct B2 uploads. The server receives the bytes from the browser
+and forwards them to B2 using boto3.
+
+For downloading chunks server-side during text extraction, we also use boto3.
+
+Trade-off:
+  Proxy approach: simpler, works everywhere, no CORS config needed on B2.
+  Direct presigned URL: faster for large files (bypasses server), but requires
+  correct CORS config on the bucket which varies by provider.
+  We use proxy here as the bare-minimum working solution.
+"""
 import io
 import re
-import urllib.parse
-from datetime import datetime, timezone
 
 import boto3
 from botocore.config import Config
 
 from app.config import get_settings
-
-
-def _sign(key: bytes, msg: str) -> bytes:
-    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
-
-
-def _get_signing_key(secret_key: str, date_stamp: str, region: str) -> bytes:
-    k_date    = _sign(("AWS4" + secret_key).encode("utf-8"), date_stamp)
-    k_region  = _sign(k_date, region)
-    k_service = _sign(k_region, "s3")
-    k_signing = _sign(k_service, "aws4_request")
-    return k_signing
-
-
-def generate_presigned_put_url(r2_key: str, content_type: str = "application/octet-stream") -> str:
-    settings   = get_settings()
-    endpoint   = settings.r2_public_url.rstrip("/")
-    bucket     = settings.r2_bucket_name
-    access_key = settings.r2_access_key_id
-    secret_key = settings.r2_secret_access_key
-    host       = endpoint.replace("https://", "").replace("http://", "")
-
-    if "backblazeb2.com" in host:
-        match  = re.match(r"s3\.([^.]+)\.backblazeb2\.com", host)
-        region = match.group(1) if match else "us-west-004"
-    else:
-        region = "auto"
-
-    now        = datetime.now(timezone.utc)
-    date_stamp = now.strftime("%Y%m%d")
-    amz_date   = now.strftime("%Y%m%dT%H%M%SZ")
-
-    encoded_key      = urllib.parse.quote(r2_key, safe="")
-    credential_scope = f"{date_stamp}/{region}/s3/aws4_request"
-    credential       = f"{access_key}/{credential_scope}"
-
-    query_params = {
-        "X-Amz-Algorithm":     "AWS4-HMAC-SHA256",
-        "X-Amz-Credential":    credential,
-        "X-Amz-Date":          amz_date,
-        "X-Amz-Expires":       "900",
-        "X-Amz-SignedHeaders": "host",
-    }
-    canonical_qs = "&".join(
-        f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(v, safe='')}"
-        for k, v in sorted(query_params.items())
-    )
-
-    canonical_request = "\n".join([
-        "PUT",
-        f"/{bucket}/{encoded_key}",
-        canonical_qs,
-        f"host:{host}\n",
-        "host",
-        "UNSIGNED-PAYLOAD",
-    ])
-
-    string_to_sign = "\n".join([
-        "AWS4-HMAC-SHA256",
-        amz_date,
-        credential_scope,
-        hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
-    ])
-
-    signing_key = _get_signing_key(secret_key, date_stamp, region)
-    signature   = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    return f"{endpoint}/{bucket}/{encoded_key}?{canonical_qs}&X-Amz-Signature={signature}"
 
 
 def _get_boto3_client():
@@ -103,7 +46,22 @@ def _get_boto3_client():
     )
 
 
+def upload_bytes(r2_key: str, data: bytes) -> None:
+    """
+    Uploads raw bytes to B2 server-side.
+    Called by the proxy endpoint — browser sends chunk to us, we forward to B2.
+    """
+    client   = _get_boto3_client()
+    settings = get_settings()
+    client.put_object(
+        Bucket=settings.r2_bucket_name,
+        Key=r2_key,
+        Body=data,
+    )
+
+
 def download_chunk_bytes(r2_key: str) -> bytes:
+    """Downloads a chunk from storage for server-side text extraction."""
     client   = _get_boto3_client()
     settings = get_settings()
     buf = io.BytesIO()
