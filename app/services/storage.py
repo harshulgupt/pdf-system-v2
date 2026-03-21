@@ -1,8 +1,9 @@
-import io
 import re
+import time
 import boto3
 from botocore.config import Config
 from app.config import get_settings
+
 
 def _get_boto3_client():
     settings = get_settings()
@@ -20,15 +21,15 @@ def _get_boto3_client():
         region_name=region,
     )
 
+
 def initiate_multipart_upload(r2_key: str) -> str:
-    """Starts a multipart upload and returns the UploadId."""
     client = _get_boto3_client()
     settings = get_settings()
     res = client.create_multipart_upload(Bucket=settings.b2_bucket_name, Key=r2_key)
     return res['UploadId']
 
+
 def generate_presigned_part_url(r2_key: str, upload_id: str, part_number: int) -> str:
-    """Generates a temporary URL for uploading a specific part."""
     client = _get_boto3_client()
     settings = get_settings()
     return client.generate_presigned_url(
@@ -42,22 +43,20 @@ def generate_presigned_part_url(r2_key: str, upload_id: str, part_number: int) -
         ExpiresIn=3600
     )
 
+
 def complete_multipart_upload(r2_key: str, upload_id: str) -> None:
-    """Fetches all uploaded parts and tells B2 to merge them."""
     client = _get_boto3_client()
     settings = get_settings()
-    
-    # 1. Fetch all parts that were uploaded to get their ETags
+
     parts_info = client.list_parts(Bucket=settings.b2_bucket_name, Key=r2_key, UploadId=upload_id)
     if 'Parts' not in parts_info or not parts_info['Parts']:
         raise RuntimeError(f"No parts found for upload {upload_id}")
-        
+
     parts_formatted = [
-        {'PartNumber': p['PartNumber'], 'ETag': p['ETag']} 
+        {'PartNumber': p['PartNumber'], 'ETag': p['ETag']}
         for p in parts_info['Parts']
     ]
-    
-    # 2. Complete the upload
+
     client.complete_multipart_upload(
         Bucket=settings.b2_bucket_name,
         Key=r2_key,
@@ -65,11 +64,19 @@ def complete_multipart_upload(r2_key: str, upload_id: str) -> None:
         MultipartUpload={'Parts': parts_formatted}
     )
 
+    # Give B2 time to propagate the assembled object before reading it
+    time.sleep(2)
+
+
 def download_file_to_disk(r2_key: str, dest_path: str) -> None:
-    """Downloads the completely merged file from B2 directly to disk."""
+    """Downloads file using get_object — avoids HeadObject which can 403 on B2."""
     client = _get_boto3_client()
     settings = get_settings()
-    client.download_file(settings.b2_bucket_name, r2_key, dest_path)
+
+    response = client.get_object(Bucket=settings.b2_bucket_name, Key=r2_key)
+    with open(dest_path, "wb") as f:
+        for chunk in response["Body"].iter_chunks(chunk_size=8 * 1024 * 1024):
+            f.write(chunk)
 
 
 def delete_file(r2_key: str) -> None:
