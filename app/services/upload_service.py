@@ -1,78 +1,122 @@
 """
-Upload service — orchestrates the write path.
-Controllers call this; this calls repositories and storage service.
+Upload service — owns the write path business logic.
+
+Flow:
+  1. init_upload()    → client calls first; gets back presigned URLs for all chunks
+  2. confirm_chunk()  → client calls after each successful PUT to R2
+  3. complete_upload()→ client calls when all chunks uploaded; triggers extraction
+
+Trade-off on synchronous processing:
+  We process the PDF synchronously inside complete_upload.
+  For a true 20 GB file this should be moved to a background queue (SQS / Railway
+  cron / RQ). Kept sync here per "bare minimum" requirement.
 """
-import uuid
-import logging
-from fastapi import HTTPException
-from sqlalchemy.orm import Session
+import io
 
-from app.core.config import settings
-from app.models.db_models import UploadStatus
-from app.repositories.upload_repository import UploadRepository
-from app.services.storage_service import generate_presigned_upload_url
+import pypdf
 
-logger = logging.getLogger(__name__)
+from app.models.models import UploadStatus
+from app.repositories.base import AbstractUploadRepository, AbstractSearchRepository
+from app.services.storage import generate_presigned_put_url, download_chunk_bytes
 
 
 class UploadService:
-    def __init__(self, db: Session):
-        self.repo = UploadRepository(db)
+
+    def __init__(
+        self,
+        upload_repo: AbstractUploadRepository,
+        search_repo: AbstractSearchRepository,
+    ):
+        self.upload_repo = upload_repo
+        self.search_repo = search_repo
 
     def init_upload(self, filename: str, total_chunks: int) -> dict:
         """
-        Step 1 of the write path.
-        Creates the upload record and returns one presigned S3 URL per chunk.
-        The frontend will PUT each chunk directly to its URL — our server is never
-        in the data path for the actual bytes.
+        Creates the upload record and returns one presigned PUT URL per chunk.
+        The browser PUTs each chunk directly to R2 — bytes never pass through
+        our API server.
         """
-        if total_chunks < 1:
-            raise HTTPException(status_code=400, detail="total_chunks must be >= 1")
-        if total_chunks > 5000:
-            raise HTTPException(status_code=400, detail="total_chunks exceeds maximum (5000)")
-
-        upload_id = str(uuid.uuid4())
-
-        # Pre-create all chunk DB records so we track every slot
+        upload = self.upload_repo.create_upload(filename, total_chunks)
         presigned_urls = []
-        for idx in range(total_chunks):
-            s3_key = f"uploads/{upload_id}/chunk_{idx:05d}"
-            self.repo.create_chunk_record(upload_id, idx, s3_key)
-            url = generate_presigned_upload_url(s3_key)
-            presigned_urls.append({"chunk_index": idx, "url": url, "s3_key": s3_key})
 
-        self.repo.create_upload(upload_id, filename, total_chunks)
+        for i in range(total_chunks):
+            r2_key = f"uploads/{upload.id}/chunk_{i:06d}"
+            url = generate_presigned_put_url(r2_key)
+            chunk_record = self.upload_repo.save_chunk_record(upload.id, i, r2_key)
+            presigned_urls.append({
+                "chunk_index": i,
+                "r2_key": r2_key,
+                "chunk_record_id": chunk_record.id,
+                "upload_url": url,
+            })
 
+        self.upload_repo.set_status(upload.id, UploadStatus.uploading)
+        return {"upload_id": upload.id, "chunks": presigned_urls}
+
+    def confirm_chunk(self, upload_id: str, chunk_index: int) -> dict:
+        """
+        Client calls this after a successful PUT to R2.
+        Increments the received counter so we know when all chunks are in.
+        """
+        upload = self.upload_repo.increment_received_chunks(upload_id)
         return {
-            "upload_id":    upload_id,
-            "total_chunks": total_chunks,
-            "presigned_urls": presigned_urls,
+            "upload_id": upload_id,
+            "received": upload.received_chunks,
+            "total": upload.total_chunks,
+            "all_received": upload.received_chunks >= upload.total_chunks,
         }
 
-    def confirm_complete(self, upload_id: str) -> dict:
+    def complete_upload(self, upload_id: str) -> dict:
         """
-        Step 2: frontend calls this after all chunks are in S3.
-        We validate and trigger the extraction background task.
+        Client calls this when all chunks are confirmed.
+        Pulls each chunk from R2, extracts text, stores it for search.
         """
-        upload = self.repo.get_upload(upload_id)
+        upload = self.upload_repo.get_upload(upload_id)
         if not upload:
-            raise HTTPException(status_code=404, detail="Upload not found")
-        if upload.status != UploadStatus.pending:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Upload is already in status '{upload.status}'"
-            )
+            raise ValueError(f"Upload {upload_id} not found")
 
-        return {"upload_id": upload_id, "status": "processing_queued"}
+        self.upload_repo.set_status(upload_id, UploadStatus.processing)
+
+        try:
+            self._process_upload(upload)
+            self.upload_repo.set_status(upload_id, UploadStatus.ready)
+            return {"upload_id": upload_id, "status": "ready"}
+        except Exception as e:
+            self.upload_repo.set_status(upload_id, UploadStatus.failed)
+            raise RuntimeError(f"Processing failed: {e}") from e
+
+    def _process_upload(self, upload) -> None:
+        """
+        Downloads each raw chunk from R2 in order, reassembles into a full PDF,
+        extracts text per page group, saves to DB for search.
+
+        Memory note: assembles the full PDF in memory. Fine up to a few GB on a
+        standard server. For true 20 GB: stream page ranges via a worker queue.
+        """
+        chunks = sorted(upload.chunks, key=lambda c: c.chunk_index)
+        pdf_bytes = b"".join(download_chunk_bytes(c.r2_key) for c in chunks)
+
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        total_pages = len(reader.pages)
+        pages_per_chunk = max(1, total_pages // max(len(chunks), 1))
+
+        for chunk_record in chunks:
+            start_page = chunk_record.chunk_index * pages_per_chunk
+            end_page = min(start_page + pages_per_chunk, total_pages)
+            text = "\n".join(
+                reader.pages[p].extract_text() or ""
+                for p in range(start_page, end_page)
+            )
+            self.search_repo.save_extracted_text(chunk_record.id, text)
 
     def get_status(self, upload_id: str) -> dict:
-        upload = self.repo.get_upload(upload_id)
+        upload = self.upload_repo.get_upload(upload_id)
         if not upload:
-            raise HTTPException(status_code=404, detail="Upload not found")
+            raise ValueError("Not found")
         return {
-            "upload_id":       upload.id,
-            "filename":        upload.filename,
-            "status":          upload.status,
-            "total_chunks":    upload.total_chunks,
-            "uploaded_chunks": upload.uploaded_chunks,
+            "upload_id": upload.id,
+            "filename": upload.filename,
+            "status": upload.status,
+            "received_chunks": upload.received_chunks,
+            "total_chunks": upload.total_chunks,
         }
