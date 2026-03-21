@@ -41,12 +41,14 @@ class SearchService:
             "results": data["results"],
         }
         
-        # Save to cache
-        _SEARCH_CACHE[cache_key] = (now, result)
-        
-        # Very naive cache cleanup to prevent memory leaks in long-running processes
-        if len(_SEARCH_CACHE) > 1000:
-            oldest_key = min(_SEARCH_CACHE.keys(), key=lambda k: _SEARCH_CACHE[k][0])
-            del _SEARCH_CACHE[oldest_key]
+        # Save to cache ONLY if we actually found results
+        # If we cache 0 results, the user gets locked out if they search while the background extraction is still running!
+        if int(result["total_occurrences"]) > 0:
+            _SEARCH_CACHE[cache_key] = (now, result)
+            
+            # Very naive cache cleanup to prevent memory leaks in long-running processes
+            if len(_SEARCH_CACHE) > 1000:
+                oldest_key = min(_SEARCH_CACHE.keys(), key=lambda k: _SEARCH_CACHE[k][0])
+                del _SEARCH_CACHE[oldest_key]
             
         return result

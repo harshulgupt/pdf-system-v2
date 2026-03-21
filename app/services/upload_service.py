@@ -84,8 +84,11 @@ class UploadService:
         
         try:
             # Stream directly from S3/B2 using our file-like wrapper to avoid OOM
+            # Wrap in BufferedReader to read in chunks (8MB) instead of byte-by-byte
+            import io
             s3_file = get_s3_file(r2_key)
-            reader = pypdf.PdfReader(s3_file)
+            buffered_file = io.BufferedReader(s3_file, buffer_size=8 * 1024 * 1024)
+            reader = pypdf.PdfReader(buffered_file)
             total_pages = len(reader.pages)
         except Exception as e:
             raise RuntimeError(f"Could not read PDF stream from S3: {e}")
