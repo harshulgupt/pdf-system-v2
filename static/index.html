@@ -174,19 +174,20 @@ async function uploadChunksParallel(file, initData, CHUNK_SIZE, CONCURRENCY) {
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        // POST chunk to our API server as multipart form data.
-        // Server forwards bytes to B2 — avoids CORS issues with direct B2 upload.
-        const formData = new FormData();
-        formData.append('file', new Blob([slice], { type: 'application/octet-stream' }), 'chunk');
-        formData.append('r2_key', chunkInfo.r2_key);
-        formData.append('upload_id', uploadId);
-        formData.append('chunk_index', String(i));
-
-        const res = await fetch(`${API}/api/upload/chunk`, {
-          method: 'POST',
-          body: formData,
+        // 1. Upload directly to Backblaze B2 using the pre-signed URL
+        const putRes = await fetch(chunkInfo.presigned_url, {
+          method: 'PUT',
+          body: slice,
         });
-        if (!res.ok) throw new Error(`Upload HTTP ${res.status}: ${await res.text()}`);
+        if (!putRes.ok) throw new Error(`B2 Upload HTTP ${putRes.status}: ${await putRes.text()}`);
+
+        // 2. Confirm receipt in the database
+        const confRes = await fetch(`${API}/api/upload/chunk/confirm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ upload_id: uploadId, chunk_index: i })
+        });
+        if (!confRes.ok) throw new Error(`DB Confirm HTTP ${confRes.status}`);
 
         done++;
         setProgress(done, totalChunks, chunkBytes);

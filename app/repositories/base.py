@@ -29,7 +29,7 @@ class AbstractUploadRepository(ABC):
         ...
 
     @abstractmethod
-    def save_chunk_record(self, upload_id: str, chunk_index: int, chunk_key: str) -> PDFChunk:
+    def save_chunk_record(self, upload_id: str, chunk_index: int, r2_key: str) -> PDFChunk:
         ...
 
 

@@ -1,36 +1,15 @@
-"""
-Upload service — owns the write path business logic.
-
-Flow:
-  1. init_upload()      → creates DB record, returns upload_id + chunk_key per chunk
-  2. upload_chunk()     → receives raw bytes from browser, forwards to B2
-  3. confirm_chunk()    → marks chunk as received in DB
-  4. complete_upload()  → triggers text extraction from B2
-"""
 import io
-
 import pypdf
-
 from app.models.models import UploadStatus
 from app.repositories.base import AbstractUploadRepository, AbstractSearchRepository
-from app.services.storage import upload_bytes, download_chunk_bytes
-
+from app.services.storage import download_chunk_bytes, generate_presigned_upload_url
 
 class UploadService:
-
-    def __init__(
-        self,
-        upload_repo: AbstractUploadRepository,
-        search_repo: AbstractSearchRepository,
-    ):
+    def __init__(self, upload_repo: AbstractUploadRepository, search_repo: AbstractSearchRepository):
         self.upload_repo = upload_repo
         self.search_repo = search_repo
 
     def init_upload(self, filename: str, total_chunks: int) -> dict:
-        """
-        Creates the upload record and returns the storage key for each chunk.
-        Browser will POST each chunk to /api/upload/chunk with its chunk_key.
-        """
         upload = self.upload_repo.create_upload(filename, total_chunks)
         chunks = []
 
@@ -40,15 +19,12 @@ class UploadService:
             chunks.append({
                 "chunk_index": i,
                 "chunk_key": chunk_key,
+                "presigned_url": generate_presigned_upload_url(chunk_key),
                 "chunk_record_id": chunk_record.id,
             })
 
         self.upload_repo.set_status(upload.id, UploadStatus.uploading)
         return {"upload_id": upload.id, "chunks": chunks}
-
-    def upload_chunk(self, chunk_key: str, data: bytes) -> None:
-        """Forwards raw chunk bytes to B2."""
-        upload_bytes(chunk_key, data)
 
     def confirm_chunk(self, upload_id: str, chunk_index: int) -> dict:
         upload = self.upload_repo.get_upload(upload_id)
@@ -61,6 +37,8 @@ class UploadService:
             "total": upload.total_chunks,
             "all_received": upload.received_chunks >= upload.total_chunks,
         }
+
+
 
     def complete_upload(self, upload_id: str) -> dict:
         upload = self.upload_repo.get_upload(upload_id)

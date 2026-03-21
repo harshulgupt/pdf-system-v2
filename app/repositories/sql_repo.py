@@ -48,8 +48,8 @@ class SQLUploadRepository(AbstractUploadRepository):
         self.db.refresh(upload)
         return upload
 
-    def save_chunk_record(self, upload_id: str, chunk_index: int, chunk_key: str) -> PDFChunk:
-        chunk = PDFChunk(upload_id=upload_id, chunk_index=chunk_index, r2_key=chunk_key)
+    def save_chunk_record(self, upload_id: str, chunk_index: int, r2_key: str) -> PDFChunk:
+        chunk = PDFChunk(upload_id=upload_id, chunk_index=chunk_index, r2_key=r2_key)
         self.db.add(chunk)
         self.db.commit()
         self.db.refresh(chunk)
