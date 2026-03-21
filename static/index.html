@@ -312,15 +312,28 @@ async function doSearch() {
       resultsEl.innerHTML = '<div class="no-results">No results found.</div>';
       return;
     }
-    resultsEl.innerHTML = data.results.map(r => `
+
+    // Summary bar showing total occurrences
+    const summary = `
+      <div style="font-size:0.8rem;color:#57534e;margin-bottom:0.5rem;padding:0.5rem 0.75rem;background:#f5f5f4;border-radius:6px;border:1px solid #e7e5e4">
+        Found <strong>${data.total_occurrences.toLocaleString()}</strong> occurrence${data.total_occurrences !== 1 ? 's' : ''}
+        across <strong>${data.total_chunks_matched}</strong> section${data.total_chunks_matched !== 1 ? 's' : ''}
+        — showing top ${data.results.length}
+      </div>`;
+
+    const cards = data.results.map(r => `
       <div class="result-card">
         <div class="result-meta">
           <strong>${escHtml(r.filename)}</strong> &nbsp;·&nbsp;
-          Chunk ${r.chunk_index} &nbsp;·&nbsp;
-          <span style="font-family:monospace;font-size:0.7rem">${r.upload_id}</span>
+          Section ${r.chunk_index} &nbsp;·&nbsp;
+          <span style="background:#dbeafe;color:#1d4ed8;font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:99px;font-weight:600">
+            ${r.occurrences_in_chunk} hit${r.occurrences_in_chunk !== 1 ? 's' : ''} in this section
+          </span>
         </div>
         <div class="result-snippet">${highlight(escHtml(r.snippet), q)}</div>
       </div>`).join('');
+
+    resultsEl.innerHTML = summary + cards;
   } catch (e) {
     resultsEl.innerHTML =
       `<div class="no-results" style="color:#dc2626">Error: ${escHtml(e.message)}</div>`;
@@ -330,11 +343,16 @@ async function doSearch() {
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+
 function highlight(html, query) {
-  const terms = query.split(/\s+/).filter(Boolean)
-    .map(t => t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+  const terms = query.trim().split(/\s+/).filter(Boolean)
+    .map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   if (!terms.length) return html;
-  return html.replace(new RegExp(`(${terms.join('|')})`, 'gi'), '<mark>$1</mark>');
+  let result = html;
+  for (const term of terms) {
+    result = result.replace(new RegExp(`(${term})`, 'gi'), '<mark>$1</mark>');
+  }
+  return result;
 }
 </script>
 </body>
