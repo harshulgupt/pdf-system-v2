@@ -20,25 +20,59 @@ def _get_boto3_client():
         region_name=region,
     )
 
-def generate_presigned_upload_url(r2_key: str) -> str:
-    """Generates a temporary URL the browser can use to upload directly to B2."""
+def initiate_multipart_upload(r2_key: str) -> str:
+    """Starts a multipart upload and returns the UploadId."""
+    client = _get_boto3_client()
+    settings = get_settings()
+    res = client.create_multipart_upload(Bucket=settings.b2_bucket_name, Key=r2_key)
+    return res['UploadId']
+
+def generate_presigned_part_url(r2_key: str, upload_id: str, part_number: int) -> str:
+    """Generates a temporary URL for uploading a specific part."""
     client = _get_boto3_client()
     settings = get_settings()
     return client.generate_presigned_url(
-        ClientMethod='put_object',
-        Params={'Bucket': settings.b2_bucket_name, 'Key': r2_key},
-        ExpiresIn=3600 # URL valid for 1 hour
+        ClientMethod='upload_part',
+        Params={
+            'Bucket': settings.b2_bucket_name,
+            'Key': r2_key,
+            'UploadId': upload_id,
+            'PartNumber': part_number
+        },
+        ExpiresIn=3600
     )
 
-def download_chunk_bytes(r2_key: str) -> bytes:
+def complete_multipart_upload(r2_key: str, upload_id: str) -> None:
+    """Fetches all uploaded parts and tells B2 to merge them."""
     client = _get_boto3_client()
     settings = get_settings()
-    buf = io.BytesIO()
-    client.download_fileobj(settings.b2_bucket_name, r2_key, buf)
-    buf.seek(0)
-    return buf.read()
+    
+    # 1. Fetch all parts that were uploaded to get their ETags
+    parts_info = client.list_parts(Bucket=settings.b2_bucket_name, Key=r2_key, UploadId=upload_id)
+    if 'Parts' not in parts_info or not parts_info['Parts']:
+        raise RuntimeError(f"No parts found for upload {upload_id}")
+        
+    parts_formatted = [
+        {'PartNumber': p['PartNumber'], 'ETag': p['ETag']} 
+        for p in parts_info['Parts']
+    ]
+    
+    # 2. Complete the upload
+    client.complete_multipart_upload(
+        Bucket=settings.b2_bucket_name,
+        Key=r2_key,
+        UploadId=upload_id,
+        MultipartUpload={'Parts': parts_formatted}
+    )
 
-def delete_chunk(r2_key: str) -> None:
+def download_file_to_disk(r2_key: str, dest_path: str) -> None:
+    """Downloads the completely merged file from B2 directly to disk."""
+    client = _get_boto3_client()
+    settings = get_settings()
+    client.download_file(settings.b2_bucket_name, r2_key, dest_path)
+
+
+def delete_file(r2_key: str) -> None:
     client = _get_boto3_client()
     settings = get_settings()
     client.delete_object(Bucket=settings.b2_bucket_name, Key=r2_key)

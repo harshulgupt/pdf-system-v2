@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, Field
 from app.dependencies import get_upload_repo, get_search_repo
 from app.repositories.base import AbstractUploadRepository, AbstractSearchRepository
@@ -35,9 +35,9 @@ def confirm_chunk(body: ConfirmChunkRequest, service: UploadService = Depends(_g
         raise HTTPException(status_code=404, detail=str(e))
 
 @router.post("/{upload_id}/complete")
-def complete_upload(upload_id: str, service: UploadService = Depends(_get_service)):
+def complete_upload(upload_id: str, background_tasks: BackgroundTasks, service: UploadService = Depends(_get_service)):
     try:
-        return service.complete_upload(upload_id)
+        return service.complete_upload(upload_id, background_tasks)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except RuntimeError as e:

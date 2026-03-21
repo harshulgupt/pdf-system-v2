@@ -1,8 +1,12 @@
 import io
+import os
+import uuid
+from fastapi import BackgroundTasks
 import pypdf
 from app.models.models import UploadStatus
 from app.repositories.base import AbstractUploadRepository, AbstractSearchRepository
-from app.services.storage import download_chunk_bytes, generate_presigned_upload_url
+from app.services.storage import initiate_multipart_upload, generate_presigned_part_url, complete_multipart_upload, download_file_to_disk
+
 
 
 class UploadService:
@@ -11,19 +15,27 @@ class UploadService:
         self.search_repo = search_repo
 
     def init_upload(self, filename: str, total_chunks: int) -> dict:
-        upload = self.upload_repo.create_upload(filename, total_chunks)
+        upload_id = str(uuid.uuid4())
+        r2_key = f"uploads/{upload_id}.pdf"
+        multipart_upload_id = initiate_multipart_upload(r2_key)
+        
+        upload = self.upload_repo.create_upload(upload_id, filename, total_chunks, multipart_upload_id)
+        
         chunks = []
         for i in range(total_chunks):
-            chunk_key = f"uploads/{upload.id}/chunk_{i:06d}"
+            part_number = i + 1
+            chunk_key = r2_key
+            presigned_url = generate_presigned_part_url(r2_key, multipart_upload_id, part_number)
             chunk_record = self.upload_repo.save_chunk_record(upload.id, i, chunk_key)
             chunks.append({
                 "chunk_index": i,
                 "chunk_key": chunk_key,
-                "presigned_url": generate_presigned_upload_url(chunk_key),
+                "presigned_url": presigned_url,
                 "chunk_record_id": chunk_record.id,
             })
         self.upload_repo.set_status(upload.id, UploadStatus.uploading)
         return {"upload_id": upload.id, "chunks": chunks}
+
 
     def confirm_chunk(self, upload_id: str, chunk_index: int) -> dict:
         upload = self.upload_repo.get_upload(upload_id)
@@ -37,7 +49,7 @@ class UploadService:
             "all_received": upload.received_chunks >= upload.total_chunks,
         }
 
-    def complete_upload(self, upload_id: str) -> dict:
+    def complete_upload(self, upload_id: str, background_tasks: BackgroundTasks) -> dict:
         upload = self.upload_repo.get_upload(upload_id)
         if not upload:
             raise ValueError(f"Upload {upload_id} not found")
@@ -45,23 +57,38 @@ class UploadService:
             raise RuntimeError(
                 f"Not all chunks received: {upload.received_chunks}/{upload.total_chunks}"
             )
+            
+        r2_key = f"uploads/{upload_id}.pdf"
+        complete_multipart_upload(r2_key, upload.multipart_upload_id)
+        
         self.upload_repo.set_status(upload_id, UploadStatus.processing)
+        background_tasks.add_task(self._process_upload_async, upload_id)
+        
+        return {"upload_id": upload_id, "status": "processing_queued"}
+
+    def _process_upload_async(self, upload_id: str) -> None:
+        upload = self.upload_repo.get_upload(upload_id)
+        if not upload:
+            return
         try:
             self._process_upload(upload)
             self.upload_repo.set_status(upload_id, UploadStatus.ready)
-            return {"upload_id": upload_id, "status": "ready"}
         except Exception as e:
             self.upload_repo.set_status(upload_id, UploadStatus.failed)
-            raise RuntimeError(f"Processing failed: {e}") from e
+            print(f"Processing failed for {upload_id}: {e}")
 
     def _process_upload(self, upload) -> None:
         chunks = sorted(upload.chunks, key=lambda c: c.chunk_index)
-        pdf_bytes = b"".join(download_chunk_bytes(c.r2_key) for c in chunks)
+        
+        tmp_path = f"/tmp/{upload.id}.pdf"
+        r2_key = f"uploads/{upload.id}.pdf"
+        
+        download_file_to_disk(r2_key, tmp_path)
+        
+        if not os.path.exists(tmp_path):
+            raise RuntimeError("Downloaded PDF file not found")
 
-        if not pdf_bytes:
-            raise RuntimeError("Downloaded PDF is empty")
-
-        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        reader = pypdf.PdfReader(tmp_path)
         total_pages = len(reader.pages)
 
         if total_pages == 0:
@@ -93,6 +120,11 @@ class UploadService:
             text = text[:500_000]
 
             self.search_repo.save_extracted_text(chunk_record.id, text)
+            
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
     def get_status(self, upload_id: str) -> dict:
         upload = self.upload_repo.get_upload(upload_id)

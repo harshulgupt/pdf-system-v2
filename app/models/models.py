@@ -29,6 +29,7 @@ class PDFUpload(Base):
     total_chunks    = Column(Integer, nullable=False)
     received_chunks = Column(Integer, default=0)
     status          = Column(Enum(UploadStatus), default=UploadStatus.initiated)
+    multipart_upload_id = Column(String, nullable=True)
     created_at      = Column(DateTime(timezone=True), default=_now)
     updated_at      = Column(DateTime(timezone=True), default=_now, onupdate=_now)
 

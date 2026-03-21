@@ -55,8 +55,13 @@ class SQLUploadRepository(AbstractUploadRepository):
     def __init__(self, db: Session):
         self.db = db
 
-    def create_upload(self, filename: str, total_chunks: int) -> PDFUpload:
-        upload = PDFUpload(filename=filename, total_chunks=total_chunks)
+    def create_upload(self, upload_id: str, filename: str, total_chunks: int, multipart_upload_id: str) -> PDFUpload:
+        upload = PDFUpload(
+            id=upload_id, 
+            filename=filename, 
+            total_chunks=total_chunks, 
+            multipart_upload_id=multipart_upload_id
+        )
         self.db.add(upload)
         self.db.commit()
         self.db.refresh(upload)
