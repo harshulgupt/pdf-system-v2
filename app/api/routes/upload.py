@@ -1,97 +1,82 @@
 """
-Upload routes.
-
-POST   /api/upload/start          → register upload session
-POST   /api/upload/chunk          → receive one binary chunk, return IMMEDIATELY
-GET    /api/upload/status/{id}    → poll: uploading → assembling → indexing → indexed
-DELETE /api/clear                 → wipe everything
-
-When the last chunk arrives, we dispatch a Celery task to a separate worker
-process instead of running in-process. The web server never touches the PDF
-processing — it stays free to handle new requests.
+Upload controller — thin layer. Validates input, calls service, returns response.
+No business logic here. No direct DB calls.
 """
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
 
-from app.db.database import get_db
-from app.repositories.chunk_repository import SQLChunkRepository
-from app.services.pdf_service import PDFService
-from app.storage.storage import get_storage
-from app.tasks.pdf_tasks import process_pdf
+from app.dependencies import get_upload_repo, get_search_repo
+from app.repositories.base import AbstractUploadRepository, AbstractSearchRepository
+from app.services.upload_service import UploadService
 
-router = APIRouter()
-
-MAX_CHUNK_BYTES = 10 * 1024 * 1024
+router = APIRouter(prefix="/upload", tags=["upload"])
 
 
-def _service(db: Session) -> PDFService:
-    return PDFService(SQLChunkRepository(db), get_storage())
+class InitUploadRequest(BaseModel):
+    filename: str = Field(..., min_length=1, max_length=255)
+    total_chunks: int = Field(..., gt=0, le=10000)
 
 
-@router.post("/upload/start")
-def start_upload(
-    upload_id:    str = Form(...),
-    filename:     str = Form(...),
-    total_chunks: int = Form(...),
-    db: Session = Depends(get_db),
-):
-    if not filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "Only PDF files accepted.")
-    if total_chunks < 1:
-        raise HTTPException(400, "total_chunks must be >= 1.")
-
-    session = _service(db).start_upload(upload_id, filename, total_chunks)
-    return {
-        "upload_id":    session.upload_id,
-        "filename":     session.filename,
-        "total_chunks": session.total_chunks,
-        "status":       session.status,
-    }
+def _get_service(
+    upload_repo: AbstractUploadRepository = Depends(get_upload_repo),
+    search_repo: AbstractSearchRepository = Depends(get_search_repo),
+) -> UploadService:
+    return UploadService(upload_repo, search_repo)
 
 
-@router.post("/upload/chunk")
-async def upload_chunk(
-    upload_id:     str        = Form(...),
-    passage_index: int        = Form(...),
-    file:          UploadFile = File(...),
-    db:            Session    = Depends(get_db),
+@router.post("/init", status_code=status.HTTP_201_CREATED)
+def init_upload(
+    body: InitUploadRequest,
+    service: UploadService = Depends(_get_service),
 ):
     """
-    Saves binary chunk to disk and returns immediately.
-    When last chunk arrives, dispatches Celery task — web server is done,
-    worker process takes over. Zero blocking of the HTTP server.
+    Step 1 — client calls this before uploading anything.
+    Returns upload_id and one presigned PUT URL per chunk.
+    Client uploads each chunk directly to R2 using those URLs.
     """
-    if passage_index < 0:
-        raise HTTPException(400, "passage_index must be >= 0.")
+    if not body.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+    return service.init_upload(body.filename, body.total_chunks)
 
-    data = await file.read()
-    if len(data) == 0:
-        raise HTTPException(400, "Empty chunk.")
-    if len(data) > MAX_CHUNK_BYTES:
-        raise HTTPException(413, f"Chunk too large (max {MAX_CHUNK_BYTES // 1024 // 1024} MB).")
 
+@router.post("/{upload_id}/chunk/{chunk_index}/confirm")
+def confirm_chunk(
+    upload_id: str,
+    chunk_index: int,
+    service: UploadService = Depends(_get_service),
+):
+    """
+    Step 2 — client calls after successfully PUTting each chunk to R2.
+    """
     try:
-        svc    = _service(db)
-        result = svc.receive_chunk(upload_id, passage_index, data)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-    # Last chunk received → dispatch to Celery worker, not BackgroundTasks
-    if result["all_received"]:
-        process_pdf.delay(upload_id)  # .delay() puts task in Redis queue
-
-    return result
+        return service.confirm_chunk(upload_id, chunk_index)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/upload/status/{upload_id}")
-def upload_status(upload_id: str, db: Session = Depends(get_db)):
+@router.post("/{upload_id}/complete")
+def complete_upload(
+    upload_id: str,
+    service: UploadService = Depends(_get_service),
+):
+    """
+    Step 3 — client calls after all chunks are confirmed.
+    Triggers text extraction and indexing.
+    """
     try:
-        return _service(db).get_status(upload_id)
+        return service.complete_upload(upload_id)
     except ValueError as e:
-        raise HTTPException(404, str(e))
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/clear")
-def clear_index(db: Session = Depends(get_db)):
-    deleted = _service(db).clear_all()
-    return {"status": "ok", "chunks_deleted": deleted}
+@router.get("/{upload_id}/status")
+def upload_status(
+    upload_id: str,
+    service: UploadService = Depends(_get_service),
+):
+    try:
+        return service.get_status(upload_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))

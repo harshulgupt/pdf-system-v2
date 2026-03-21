@@ -1,46 +1,41 @@
-"""
-Database layer — SQLite locally, PostgreSQL in production.
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import declarative_base, sessionmaker
 
-To swap database on Render:
-  1. Create a Postgres instance on Render
-  2. Copy the "Internal Database URL" 
-  3. Set DATABASE_URL env var on your web service to that URL
-  4. Redeploy — done. No code changes needed.
+from app.config import get_settings
 
-SQLAlchemy handles both dialects identically.
-The only differences handled here:
-  - SQLite needs check_same_thread=False (threading safety flag)
-  - Render Postgres URLs start with postgres:// but SQLAlchemy needs postgresql://
-"""
-import os
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, DeclarativeBase
+settings = get_settings()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./pdf_store.db")
+engine = create_engine(
+    settings.database_url,
+    # For SQLite (dev fallback) we need this flag; ignored by Postgres
+    connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},
+    pool_pre_ping=True,   # detect stale connections
+)
 
-# Render gives postgres:// but SQLAlchemy requires postgresql://
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-# SQLite needs this; Postgres does not
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+Base = declarative_base()
 
-class Base(DeclarativeBase):
-    pass
+
+def init_db():
+    """Create all tables. In prod you'd use Alembic migrations."""
+    from app.models import models  # noqa: F401 — imports needed for Base.metadata
+    Base.metadata.create_all(bind=engine)
+
+    # Create a simple full-text search index on extracted_text if using Postgres
+    if "postgresql" in settings.database_url:
+        with engine.connect() as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_chunks_fts "
+                "ON pdf_chunks USING gin(to_tsvector('english', extracted_text))"
+            ))
+            conn.commit()
 
 
 def get_db():
+    """FastAPI dependency — yields a DB session and closes it after the request."""
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
-
-
-def init_db():
-    from app.db import models  # noqa: F401
-    Base.metadata.create_all(bind=engine)
