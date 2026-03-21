@@ -30,15 +30,26 @@ def resume_interrupted_tasks():
             return
 
         logger.info(f"Found {len(interrupted)} interrupted tasks. Resuming...")
-        upload_repo = SQLUploadRepository(db)
-        search_repo = SQLSearchRepository(db)
-        service = UploadService(upload_repo, search_repo)
 
         for upload in interrupted:
             logger.info(f"Resuming task for upload: {upload.id}")
             # Run in a background thread to not block the asyncio event loop startup
             loop = asyncio.get_running_loop()
-            loop.run_in_executor(None, service._process_upload_async, upload.id)
+            
+            # Create a completely isolated DB session to prevent "concurrent operations" crash
+            def run_job(u_id):
+                local_db = SessionLocal()
+                try:
+                    upload_repo = SQLUploadRepository(local_db)
+                    search_repo = SQLSearchRepository(local_db)
+                    service = UploadService(upload_repo, search_repo)
+                    service._process_upload_async(u_id)
+                except Exception as ex:
+                    logger.error(f"Job failed: {ex}")
+                finally:
+                    local_db.close()
+                    
+            loop.run_in_executor(None, run_job, upload.id)
             
     except Exception as e:
         logger.error(f"Error resuming tasks: {e}")

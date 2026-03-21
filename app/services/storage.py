@@ -87,18 +87,27 @@ class S3File(io.RawIOBase):
         self.position = 0
         
         # Backblaze B2 often presents eventual consistency delays immediately after multipart upload
+        # AND restricted B2 Application Keys often return 403 Forbidden on HEAD requests (head_object)
+        # while successfully allowing GET requests. Thus, we use a 1-byte GET trick to parse the total size.
         import time
         response = None
-        for attempt in range(5):
+        for attempt in range(10):
             try:
-                response = self.client.head_object(Bucket=self.bucket, Key=self.key)
+                response = self.client.get_object(Bucket=self.bucket, Key=self.key, Range="bytes=0-0")
+                cr = response.get('ContentRange', '')  # e.g., 'bytes 0-0/6291456'
+                if cr and '/' in cr:
+                    self.size = int(cr.split('/')[-1])
+                else:
+                    self.size = response['ContentLength']
                 break
             except Exception as e:
-                if attempt == 4:
-                    raise RuntimeError(f"HeadObject failed after 5 attempts: {e}")
-                time.sleep(1.0 + attempt * 0.5)
-                
-        self.size = response['ContentLength']
+                # If the file is exactly 0 bytes long, B2 returns 416 Range Not Satisfiable
+                if '416' in str(e):
+                    self.size = 0
+                    break
+                if attempt == 9:
+                    raise RuntimeError(f"S3 size check failed after 10 attempts: {e}")
+                time.sleep(2.0 + attempt * 1.0)
 
     def seek(self, offset, whence=io.SEEK_SET):
         if whence == io.SEEK_SET:
