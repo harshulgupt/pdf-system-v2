@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     database_url: str = "sqlite:///./pdf_store.db"
+    redis_url: str = "redis://localhost:6379/0"
 
     b2_access_key_id: str = ""
     b2_secret_access_key: str = ""
