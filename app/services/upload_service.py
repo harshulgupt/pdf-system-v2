@@ -57,12 +57,25 @@ class UploadService:
             )
             
         r2_key = f"uploads/{upload_id}.pdf"
+        
+        # Bypassing the circular import problem since storage functions are imported top-level
         complete_multipart_upload(r2_key, upload.multipart_upload_id)
         
         self.upload_repo.set_status(upload_id, UploadStatus.processing)
-        background_tasks.add_task(self._process_upload_async, upload_id)
         
-        return {"upload_id": upload_id, "status": "processing_queued"}
+        from app.db.cache import get_redis_client
+        redis_client = get_redis_client()
+        
+        if redis_client:
+            # Shift processing workload out of FastAPI server memory into Redis queue
+            redis_client.lpush("pdf_processing_queue", upload_id)
+            status = "processing_queued"
+        else:
+            # Resilient fallback explicitly designed for minimal interruption
+            background_tasks.add_task(self._process_upload_async, upload_id)
+            status = "processing_background"
+        
+        return {"upload_id": upload_id, "status": status}
 
     def _process_upload_async(self, upload_id: str) -> None:
         upload = self.upload_repo.get_upload(upload_id)
