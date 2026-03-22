@@ -3,7 +3,8 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.models.models import PDFUpload, PDFChunk, UploadStatus
+from app.models.models import PDFUpload, PDFChunk, UploadStatus, ReceivedChunk
+from sqlalchemy.exc import IntegrityError
 from app.repositories.base import AbstractUploadRepository, AbstractSearchRepository
 
 STOP_WORDS = {
@@ -55,10 +56,11 @@ class SQLUploadRepository(AbstractUploadRepository):
     def __init__(self, db: Session):
         self.db = db
 
-    def create_upload(self, upload_id: str, filename: str, total_chunks: int, multipart_upload_id: str) -> PDFUpload:
+    def create_upload(self, upload_id: str, filename: str, total_chunks: int, multipart_upload_id: str, file_hash: Optional[str] = None) -> PDFUpload:
         upload = PDFUpload(
             id=upload_id, 
             filename=filename, 
+            file_hash=file_hash,
             total_chunks=total_chunks, 
             multipart_upload_id=multipart_upload_id
         )
@@ -67,14 +69,28 @@ class SQLUploadRepository(AbstractUploadRepository):
         self.db.refresh(upload)
         return upload
 
+    def get_upload_by_hash(self, file_hash: str) -> Optional[PDFUpload]:
+        return self.db.query(PDFUpload).filter(PDFUpload.file_hash == file_hash, PDFUpload.status == UploadStatus.ready).first()
+
     def get_upload(self, upload_id: str) -> Optional[PDFUpload]:
         return self.db.query(PDFUpload).filter(PDFUpload.id == upload_id).first()
 
-    def increment_received_chunks(self, upload_id: str) -> PDFUpload:
+    def increment_received_chunks(self, upload_id: str, chunk_index: int) -> PDFUpload:
         upload = self.get_upload(upload_id)
         if not upload:
             raise ValueError(f"Upload {upload_id} not found")
-        upload.received_chunks += 1
+            
+        chunk_record = ReceivedChunk(upload_id=upload_id, chunk_index=chunk_index)
+        self.db.add(chunk_record)
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            # Chunk already received, just ignore
+            pass
+            
+        count = self.db.query(ReceivedChunk).filter(ReceivedChunk.upload_id == upload_id).count()
+        upload.received_chunks = count
         self.db.commit()
         self.db.refresh(upload)
         return upload

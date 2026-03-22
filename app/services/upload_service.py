@@ -14,12 +14,21 @@ class UploadService:
         self.upload_repo = upload_repo
         self.search_repo = search_repo
 
-    def init_upload(self, filename: str, total_chunks: int) -> dict:
+    def init_upload(self, filename: str, total_chunks: int, file_hash: str = None) -> dict:
+        if file_hash:
+            existing = self.upload_repo.get_upload_by_hash(file_hash)
+            if existing:
+                return {
+                    "upload_id": existing.id,
+                    "status": "existing",
+                    "chunks": []
+                }
+                
         upload_id = str(uuid.uuid4())
         r2_key = f"uploads/{upload_id}.pdf"
         multipart_upload_id = initiate_multipart_upload(r2_key)
         
-        upload = self.upload_repo.create_upload(upload_id, filename, total_chunks, multipart_upload_id)
+        upload = self.upload_repo.create_upload(upload_id, filename, total_chunks, multipart_upload_id, file_hash=file_hash)
         
         chunks = []
         for i in range(total_chunks):
@@ -39,7 +48,7 @@ class UploadService:
         upload = self.upload_repo.get_upload(upload_id)
         if not upload:
             raise ValueError(f"Upload {upload_id} not found")
-        upload = self.upload_repo.increment_received_chunks(upload_id)
+        upload = self.upload_repo.increment_received_chunks(upload_id, chunk_index)
         return {
             "upload_id": upload_id,
             "received": upload.received_chunks,

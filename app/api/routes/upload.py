@@ -10,6 +10,7 @@ router = APIRouter(prefix="/upload", tags=["upload"])
 class InitUploadRequest(BaseModel):
     filename: str = Field(..., min_length=1, max_length=255, pattern=r"^[\w\-. ]+$")
     total_chunks: int = Field(..., gt=0, le=10000)
+    file_hash: str = Field(None, description="SHA-256 hash or unique identifier of the file")
 
 class ConfirmChunkRequest(BaseModel):
     upload_id: str
@@ -29,7 +30,7 @@ def init_upload(
 ):
     if not body.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
-    return service.init_upload(body.filename, body.total_chunks)
+    return service.init_upload(body.filename, body.total_chunks, file_hash=body.file_hash)
 
 @router.post("/chunk/confirm")
 def confirm_chunk(

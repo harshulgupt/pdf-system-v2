@@ -228,6 +228,14 @@ async function startUpload() {
   if (!file) return alert('Please select a PDF file first.');
   if (!file.name.toLowerCase().endsWith('.pdf')) return alert('Only PDF files are accepted.');
 
+  // Generate a pseudo-hash to detect duplicate files
+  const sliceSize = Math.min(file.size, 1024 * 1024);
+  const buffer = await file.slice(0, sliceSize).arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  const fileHash = `${hashHex}-${file.size}-${file.lastModified}`;
+
   const CHUNK_SIZE    = parseInt(document.getElementById('chunk-mb').value)  * 1024 * 1024;
   const CONCURRENCY   = parseInt(document.getElementById('concurrency').value);
   const totalChunks   = Math.ceil(file.size / CHUNK_SIZE);
@@ -248,10 +256,19 @@ async function startUpload() {
     const res = await fetch(`${API}/api/upload/init`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: file.name, total_chunks: totalChunks }),
+      body: JSON.stringify({ filename: file.name, total_chunks: totalChunks, file_hash: fileHash }),
     });
     if (!res.ok) throw new Error(await res.text());
     initData = await res.json();
+    
+    if (initData.status === "existing") {
+      log(`File already uploaded — upload ID: ${initData.upload_id}`, 'ok');
+      document.getElementById('upload-id-filter').value = initData.upload_id;
+      setBadge('ready', 'green');
+      document.getElementById('upload-btn').disabled = false;
+      return;
+    }
+    
     log(`Initiated — upload ID: ${initData.upload_id}`, 'ok');
     document.getElementById('upload-id-filter').value = initData.upload_id;
   } catch (e) {

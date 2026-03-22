@@ -13,7 +13,11 @@ from app.models.models import PDFUpload, PDFChunk, UploadStatus
 class AbstractUploadRepository(ABC):
 
     @abstractmethod
-    def create_upload(self, upload_id: str, filename: str, total_chunks: int, multipart_upload_id: str) -> PDFUpload:
+    def create_upload(self, upload_id: str, filename: str, total_chunks: int, multipart_upload_id: str, file_hash: Optional[str] = None) -> PDFUpload:
+        ...
+
+    @abstractmethod
+    def get_upload_by_hash(self, file_hash: str) -> Optional[PDFUpload]:
         ...
 
     @abstractmethod
@@ -21,7 +25,7 @@ class AbstractUploadRepository(ABC):
         ...
 
     @abstractmethod
-    def increment_received_chunks(self, upload_id: str) -> PDFUpload:
+    def increment_received_chunks(self, upload_id: str, chunk_index: int) -> PDFUpload:
         ...
 
     @abstractmethod
