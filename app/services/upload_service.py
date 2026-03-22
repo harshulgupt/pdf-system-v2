@@ -80,51 +80,49 @@ class UploadService:
     def _process_upload(self, upload) -> None:
         chunks = sorted(upload.chunks, key=lambda c: c.chunk_index)
         
-        tmp_path = f"/tmp/{upload.id}.pdf"
         r2_key = f"uploads/{upload.id}.pdf"
         
-        download_file_to_disk(r2_key, tmp_path)
+        from app.services.storage import get_s3_file_stream
+        s3_stream = get_s3_file_stream(r2_key)
         
-        if not os.path.exists(tmp_path):
-            raise RuntimeError("Downloaded PDF file not found")
-
-        reader = pypdf.PdfReader(tmp_path)
-        total_pages = len(reader.pages)
-
-        if total_pages == 0:
-            raise RuntimeError("PDF has no pages or could not be read")
-
-        pages_per_chunk = max(1, total_pages // max(len(chunks), 1))
-
-        for chunk_record in chunks:
-            start_page = chunk_record.chunk_index * pages_per_chunk
-            end_page = min(start_page + pages_per_chunk, total_pages)
-
-            if start_page >= total_pages:
-                text = ""
-            else:
-                raw_parts = []
-                for p in range(start_page, end_page):
-                    try:
-                        raw_parts.append(reader.pages[p].extract_text() or "")
-                    except Exception:
-                        raw_parts.append("")
-                text = "\n".join(raw_parts)
-
-            # Clean text for Postgres
-            text = text.replace("\x00", "")
-            text = "".join(
-                ch for ch in text
-                if ch == "\n" or ch == "\t" or ord(ch) >= 32
-            )
-            text = text[:500_000]
-
-            self.search_repo.save_extracted_text(chunk_record.id, text)
-            
         try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
+            reader = pypdf.PdfReader(s3_stream)
+            total_pages = len(reader.pages)
+
+            if total_pages == 0:
+                raise RuntimeError("PDF has no pages or could not be read")
+
+            pages_per_chunk = max(1, total_pages // max(len(chunks), 1))
+
+            for chunk_record in chunks:
+                start_page = chunk_record.chunk_index * pages_per_chunk
+                end_page = min(start_page + pages_per_chunk, total_pages)
+
+                if start_page >= total_pages:
+                    text = ""
+                else:
+                    raw_parts = []
+                    for p in range(start_page, end_page):
+                        try:
+                            raw_parts.append(reader.pages[p].extract_text() or "")
+                        except Exception:
+                            raw_parts.append("")
+                    text = "\n".join(raw_parts)
+
+                # Clean text for Postgres
+                text = text.replace("\x00", "")
+                text = "".join(
+                    ch for ch in text
+                    if ch == "\n" or ch == "\t" or ord(ch) >= 32
+                )
+                text = text[:500_000]
+
+                self.search_repo.save_extracted_text(chunk_record.id, text)
+        finally:
+            try:
+                s3_stream.close()
+            except Exception:
+                pass
 
     def get_status(self, upload_id: str) -> dict:
         upload = self.upload_repo.get_upload(upload_id)

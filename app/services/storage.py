@@ -82,3 +82,67 @@ def delete_file(r2_key: str) -> None:
     client = _get_boto3_client()
     settings = get_settings()
     client.delete_object(Bucket=settings.b2_bucket_name, Key=r2_key)
+
+class S3File(io.RawIOBase):
+    """
+    Acts as a standard binary byte-stream file, but routes read() and seek()
+    calls dynamically into HTTP Range requests to the B2 Bucket.
+    """
+    def __init__(self, s3_client, bucket, key):
+        self.s3_client = s3_client
+        self.bucket = bucket
+        self.key = key
+        self.position = 0
+        
+        # Bypass HeadObject by pinging the first byte to get the total length.
+        response = self.s3_client.get_object(Bucket=self.bucket, Key=self.key, Range='bytes=0-0')
+        content_range = response.get('ContentRange', '')
+        if '/' in content_range:
+            self.size = int(content_range.split('/')[1])
+        else:
+            self.size = response['ContentLength']
+            
+    def seek(self, offset, whence=io.SEEK_SET):
+        if whence == io.SEEK_SET:
+            self.position = offset
+        elif whence == io.SEEK_CUR:
+            self.position += offset
+        elif whence == io.SEEK_END:
+            self.position = self.size + offset
+        else:
+            raise ValueError("Invalid whence")
+            
+        self.position = max(0, min(self.position, self.size))
+        return self.position
+        
+    def tell(self):
+        return self.position
+        
+    def readinto(self, b):
+        length = len(b)
+        if length == 0 or self.position >= self.size:
+            return 0
+            
+        end_position = min(self.position + length - 1, self.size - 1)
+        range_header = f"bytes={self.position}-{end_position}"
+        
+        response = self.s3_client.get_object(
+            Bucket=self.bucket, 
+            Key=self.key, 
+            Range=range_header
+        )
+        data = response['Body'].read()
+        n = len(data)
+        b[:n] = data
+        self.position += n
+        return n
+        
+    def seekable(self): return True
+    def readable(self): return True
+
+def get_s3_file_stream(r2_key: str):
+    """Returns a BufferedReader wrapped around an S3 byte-range stream."""
+    client = _get_boto3_client()
+    settings = get_settings()
+    # Wrapping it pools many tiny reads (which `pypdf` performs heavily) into fewer larger HTTP requests.
+    return io.BufferedReader(S3File(client, settings.b2_bucket_name, r2_key), buffer_size=1 * 1024 * 1024)
