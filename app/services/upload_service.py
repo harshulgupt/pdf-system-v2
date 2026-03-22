@@ -91,11 +91,18 @@ class UploadService:
     def _process_upload(self, upload) -> None:
         r2_key = f"uploads/{upload.id}.pdf"
         
-        from app.services.storage import get_s3_file_stream
-        s3_stream = get_s3_file_stream(r2_key)
+        from app.services.storage import download_file_to_disk
+        import os
+        
+        local_path = f"/tmp/{upload.id}.pdf"
         
         try:
-            reader = pypdf.PdfReader(s3_stream)
+            # Download file to disk first.
+            # This is much faster for large files than S3 byte-range streaming 
+            # because `pypdf` makes many random reads/seeks.
+            download_file_to_disk(r2_key, local_path)
+            
+            reader = pypdf.PdfReader(local_path)
             total_pages = len(reader.pages)
 
             if total_pages == 0:
@@ -130,10 +137,12 @@ class UploadService:
                 chunk_idx += 1
                 
         finally:
-            try:
-                s3_stream.close()
-            except Exception:
-                pass
+            # Always clean up the local file to preserve ephemeral disk space
+            if os.path.exists(local_path):
+                try:
+                    os.remove(local_path)
+                except Exception:
+                    pass
 
     def get_status(self, upload_id: str) -> dict:
         upload = self.upload_repo.get_upload(upload_id)
