@@ -69,7 +69,13 @@ def download_file_to_disk(r2_key: str, dest_path: str) -> None:
     """Downloads the completely merged file from B2 directly to disk."""
     client = _get_boto3_client()
     settings = get_settings()
-    client.download_file(settings.b2_bucket_name, r2_key, dest_path)
+    
+    # We use get_object directly to bypass boto3's internal HeadObject call!
+    response = client.get_object(Bucket=settings.b2_bucket_name, Key=r2_key)
+    with open(dest_path, 'wb') as f:
+        for chunk in response['Body'].iter_chunks(chunk_size=8 * 1024 * 1024):
+            if chunk:
+                f.write(chunk)
 
 
 def delete_file(r2_key: str) -> None:
