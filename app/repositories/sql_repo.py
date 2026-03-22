@@ -171,7 +171,7 @@ class SQLSearchRepository(AbstractSearchRepository):
                 ), 0) AS total_occurrences
                 FROM pdf_chunks c,
                      to_tsquery('english', :tsquery) q
-                WHERE to_tsvector('english', c.extracted_text) @@ q
+                WHERE c.search_vector @@ q
             """
             params_count = {"query": fts_words[0], "tsquery": tsquery_str}
             if upload_id:
@@ -184,11 +184,11 @@ class SQLSearchRepository(AbstractSearchRepository):
                 SELECT
                     c.id AS chunk_id, c.upload_id, c.chunk_index,
                     u.filename, c.extracted_text AS full_text,
-                    ts_rank(to_tsvector('english', c.extracted_text), q) AS rank
+                    ts_rank(c.search_vector, q) AS rank
                 FROM pdf_chunks c
                 JOIN pdf_uploads u ON u.id = c.upload_id,
                      to_tsquery('english', :tsquery) q
-                WHERE to_tsvector('english', c.extracted_text) @@ q
+                WHERE c.search_vector @@ q
             """
             params = {"tsquery": tsquery_str, "limit": limit}
             if upload_id:

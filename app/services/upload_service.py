@@ -24,14 +24,12 @@ class UploadService:
         chunks = []
         for i in range(total_chunks):
             part_number = i + 1
-            chunk_key = r2_key
             presigned_url = generate_presigned_part_url(r2_key, multipart_upload_id, part_number)
-            chunk_record = self.upload_repo.save_chunk_record(upload.id, i, chunk_key)
+            # We explicitly DO NOT create dummy database PDFChunks here anymore.
+            # Semantic text chunks will be created during _process_upload async task.
             chunks.append({
                 "chunk_index": i,
-                "chunk_key": chunk_key,
                 "presigned_url": presigned_url,
-                "chunk_record_id": chunk_record.id,
             })
         self.upload_repo.set_status(upload.id, UploadStatus.uploading)
         return {"upload_id": upload.id, "chunks": chunks}
@@ -78,8 +76,6 @@ class UploadService:
             print(f"Processing failed for {upload_id}: {e}")
 
     def _process_upload(self, upload) -> None:
-        chunks = sorted(upload.chunks, key=lambda c: c.chunk_index)
-        
         r2_key = f"uploads/{upload.id}.pdf"
         
         from app.services.storage import get_s3_file_stream
@@ -92,22 +88,20 @@ class UploadService:
             if total_pages == 0:
                 raise RuntimeError("PDF has no pages or could not be read")
 
-            pages_per_chunk = max(1, total_pages // max(len(chunks), 1))
+            # Semantic text chunking (5 pages per semantic chunk to maintain context boundaries)
+            pages_per_chunk = 5
+            chunk_idx = 0
 
-            for chunk_record in chunks:
-                start_page = chunk_record.chunk_index * pages_per_chunk
+            for start_page in range(0, total_pages, pages_per_chunk):
                 end_page = min(start_page + pages_per_chunk, total_pages)
-
-                if start_page >= total_pages:
-                    text = ""
-                else:
-                    raw_parts = []
-                    for p in range(start_page, end_page):
-                        try:
-                            raw_parts.append(reader.pages[p].extract_text() or "")
-                        except Exception:
-                            raw_parts.append("")
-                    text = "\n".join(raw_parts)
+                
+                raw_parts = []
+                for p in range(start_page, end_page):
+                    try:
+                        raw_parts.append(reader.pages[p].extract_text() or "")
+                    except Exception:
+                        raw_parts.append("")
+                text = "\n".join(raw_parts)
 
                 # Clean text for Postgres
                 text = text.replace("\x00", "")
@@ -117,7 +111,11 @@ class UploadService:
                 )
                 text = text[:500_000]
 
+                # Create the semantic chunk record mapped to this block of text
+                chunk_record = self.upload_repo.save_chunk_record(upload.id, chunk_idx, r2_key)
                 self.search_repo.save_extracted_text(chunk_record.id, text)
+                chunk_idx += 1
+                
         finally:
             try:
                 s3_stream.close()

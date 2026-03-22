@@ -43,21 +43,33 @@ def generate_presigned_part_url(r2_key: str, upload_id: str, part_number: int) -
     )
 
 def complete_multipart_upload(r2_key: str, upload_id: str) -> None:
-    """Fetches all uploaded parts and tells B2 to merge them."""
+    """Fetches all uploaded parts (paginated) and tells B2 to merge them."""
     client = _get_boto3_client()
     settings = get_settings()
     
-    # 1. Fetch all parts that were uploaded to get their ETags
-    parts_info = client.list_parts(Bucket=settings.b2_bucket_name, Key=r2_key, UploadId=upload_id)
-    if 'Parts' not in parts_info or not parts_info['Parts']:
+    parts_formatted = []
+    part_number_marker = 0
+    
+    while True:
+        parts_info = client.list_parts(
+            Bucket=settings.b2_bucket_name, 
+            Key=r2_key, 
+            UploadId=upload_id,
+            PartNumberMarker=part_number_marker
+        )
+        
+        if 'Parts' in parts_info and parts_info['Parts']:
+            for p in parts_info['Parts']:
+                parts_formatted.append({'PartNumber': p['PartNumber'], 'ETag': p['ETag']})
+                
+        if parts_info.get('IsTruncated'):
+            part_number_marker = parts_info.get('NextPartNumberMarker')
+        else:
+            break
+
+    if not parts_formatted:
         raise RuntimeError(f"No parts found for upload {upload_id}")
         
-    parts_formatted = [
-        {'PartNumber': p['PartNumber'], 'ETag': p['ETag']} 
-        for p in parts_info['Parts']
-    ]
-    
-    # 2. Complete the upload
     client.complete_multipart_upload(
         Bucket=settings.b2_bucket_name,
         Key=r2_key,
