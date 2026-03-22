@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.dependencies import get_search_repo
 from app.repositories.base import AbstractSearchRepository
 from app.services.search_service import SearchService
+from app.api.security import RateLimiter
 
 router = APIRouter(prefix="/search", tags=["search"])
 
@@ -21,10 +22,17 @@ def _get_service(
 
 @router.get("/")
 def search(
-    q: str = Query(..., min_length=2, description="Search query"),
+    q: str = Query(
+        ..., 
+        min_length=2, 
+        max_length=150, 
+        pattern="^[A-Za-z0-9\\s\\-_.,?!]+$",
+        description="Search query (alphanumeric and basic punctuation only)"
+    ),
     upload_id: Optional[str] = Query(None, description="Limit search to one PDF"),
     limit: int = Query(10, ge=1, le=50),
     service: SearchService = Depends(_get_service),
+    _rate_limit: bool = Depends(RateLimiter(max_requests=50, window_seconds=60))
 ):
     """
     Read path — search extracted text across all (or one) uploaded PDF.

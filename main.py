@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from app.api.routes import upload, search
 from app.db.database import init_db
+from app.api.middleware import SecurityHeadersMiddleware, PayloadSizeLimitMiddleware, TimeoutMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,10 +23,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="PDF Processing System", version="2.0.0", lifespan=lifespan)
 
+# Add custom security middlewares
+app.add_middleware(TimeoutMiddleware, timeout=15.0)
+app.add_middleware(PayloadSizeLimitMiddleware, max_payload_size=524288) # 512KB limits Memory DoS
+app.add_middleware(SecurityHeadersMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    # Kept wildcard since frontend serves from same origin or external, 
+    # but tightened allowed methods to only those that exist.
+    allow_origins=["*"], 
+    allow_methods=["GET", "POST", "OPTIONS"], 
     allow_headers=["*"],
 )
 
