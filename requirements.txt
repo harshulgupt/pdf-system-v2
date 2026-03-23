@@ -1,19 +1,9 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 sqlalchemy==2.0.35
-pypdf==4.3.1
+pymupdf==1.24.9
 python-multipart==0.0.12
 boto3==1.35.0
 pydantic-settings==2.4.0
 psycopg2-binary==2.9.9
 redis
-
-
-
-
-
-# pymongo==4.8.0
-# cx_Oracle==8.3.0
-# pinecone-client==3.0.0
-# openai==1.0.0
-# redis[hiredis]==5.0.0 

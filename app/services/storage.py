@@ -4,88 +4,98 @@ import boto3
 from botocore.config import Config
 from app.config import get_settings
 
+_boto3_client = None
+
 def _get_boto3_client():
+    global _boto3_client
+    if _boto3_client is not None:
+        return _boto3_client
+
     settings = get_settings()
     endpoint = settings.b2_endpoint_url.strip()
     host = endpoint.replace("https://", "").replace("http://", "")
     match = re.match(r"s3\.([^.]+)\.backblazeb2\.com", host)
     region = match.group(1) if match else "us-west-004"
 
-    return boto3.client(
+    _boto3_client = boto3.client(
         "s3",
         endpoint_url=endpoint,
         aws_access_key_id=settings.b2_access_key_id.strip(),
         aws_secret_access_key=settings.b2_secret_access_key.strip(),
-        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "path"},
+            retries={"max_attempts": 3, "mode": "adaptive"},
+        ),
         region_name=region,
     )
+    return _boto3_client
+
 
 def initiate_multipart_upload(r2_key: str) -> str:
-    """Starts a multipart upload and returns the UploadId."""
     client = _get_boto3_client()
     settings = get_settings()
     res = client.create_multipart_upload(Bucket=settings.b2_bucket_name, Key=r2_key)
-    return res['UploadId']
+    return res["UploadId"]
+
 
 def generate_presigned_part_url(r2_key: str, upload_id: str, part_number: int) -> str:
-    """Generates a temporary URL for uploading a specific part."""
     client = _get_boto3_client()
     settings = get_settings()
     return client.generate_presigned_url(
-        ClientMethod='upload_part',
+        ClientMethod="upload_part",
         Params={
-            'Bucket': settings.b2_bucket_name,
-            'Key': r2_key,
-            'UploadId': upload_id,
-            'PartNumber': part_number
+            "Bucket": settings.b2_bucket_name,
+            "Key": r2_key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
         },
-        ExpiresIn=3600
+        ExpiresIn=3600,
     )
 
+
 def complete_multipart_upload(r2_key: str, upload_id: str) -> None:
-    """Fetches all uploaded parts (paginated) and tells B2 to merge them."""
     client = _get_boto3_client()
     settings = get_settings()
-    
+
     parts_formatted = []
     part_number_marker = 0
-    
+
     while True:
         parts_info = client.list_parts(
-            Bucket=settings.b2_bucket_name, 
-            Key=r2_key, 
+            Bucket=settings.b2_bucket_name,
+            Key=r2_key,
             UploadId=upload_id,
-            PartNumberMarker=part_number_marker
+            PartNumberMarker=part_number_marker,
         )
-        
-        if 'Parts' in parts_info and parts_info['Parts']:
-            for p in parts_info['Parts']:
-                parts_formatted.append({'PartNumber': p['PartNumber'], 'ETag': p['ETag']})
-                
-        if parts_info.get('IsTruncated'):
-            part_number_marker = parts_info.get('NextPartNumberMarker')
+        for p in parts_info.get("Parts", []):
+            parts_formatted.append({"PartNumber": p["PartNumber"], "ETag": p["ETag"]})
+        if parts_info.get("IsTruncated"):
+            part_number_marker = parts_info.get("NextPartNumberMarker")
         else:
             break
 
     if not parts_formatted:
         raise RuntimeError(f"No parts found for upload {upload_id}")
-        
+
     client.complete_multipart_upload(
         Bucket=settings.b2_bucket_name,
         Key=r2_key,
         UploadId=upload_id,
-        MultipartUpload={'Parts': parts_formatted}
+        MultipartUpload={"Parts": parts_formatted},
     )
 
+
 def download_file_to_disk(r2_key: str, dest_path: str) -> None:
-    """Downloads the completely merged file from B2 directly to disk."""
+    """
+    Downloads the file from B2 to a local path using streaming 8 MB chunks.
+    Memory stays flat regardless of file size.
+    """
     client = _get_boto3_client()
     settings = get_settings()
-    
-    # We use get_object directly to bypass boto3's internal HeadObject call!
     response = client.get_object(Bucket=settings.b2_bucket_name, Key=r2_key)
-    with open(dest_path, 'wb') as f:
-        for chunk in response['Body'].iter_chunks(chunk_size=8 * 1024 * 1024):
+    with open(dest_path, "wb") as f:
+        for chunk in response["Body"].iter_chunks(chunk_size=8 * 1024 * 1024):
             if chunk:
                 f.write(chunk)
 
@@ -94,67 +104,3 @@ def delete_file(r2_key: str) -> None:
     client = _get_boto3_client()
     settings = get_settings()
     client.delete_object(Bucket=settings.b2_bucket_name, Key=r2_key)
-
-class S3File(io.RawIOBase):
-    """
-    Acts as a standard binary byte-stream file, but routes read() and seek()
-    calls dynamically into HTTP Range requests to the B2 Bucket.
-    """
-    def __init__(self, s3_client, bucket, key):
-        self.s3_client = s3_client
-        self.bucket = bucket
-        self.key = key
-        self.position = 0
-        
-        # Bypass HeadObject by pinging the first byte to get the total length.
-        response = self.s3_client.get_object(Bucket=self.bucket, Key=self.key, Range='bytes=0-0')
-        content_range = response.get('ContentRange', '')
-        if '/' in content_range:
-            self.size = int(content_range.split('/')[1])
-        else:
-            self.size = response['ContentLength']
-            
-    def seek(self, offset, whence=io.SEEK_SET):
-        if whence == io.SEEK_SET:
-            self.position = offset
-        elif whence == io.SEEK_CUR:
-            self.position += offset
-        elif whence == io.SEEK_END:
-            self.position = self.size + offset
-        else:
-            raise ValueError("Invalid whence")
-            
-        self.position = max(0, min(self.position, self.size))
-        return self.position
-        
-    def tell(self):
-        return self.position
-        
-    def readinto(self, b):
-        length = len(b)
-        if length == 0 or self.position >= self.size:
-            return 0
-            
-        end_position = min(self.position + length - 1, self.size - 1)
-        range_header = f"bytes={self.position}-{end_position}"
-        
-        response = self.s3_client.get_object(
-            Bucket=self.bucket, 
-            Key=self.key, 
-            Range=range_header
-        )
-        data = response['Body'].read()
-        n = len(data)
-        b[:n] = data
-        self.position += n
-        return n
-        
-    def seekable(self): return True
-    def readable(self): return True
-
-def get_s3_file_stream(r2_key: str):
-    """Returns a BufferedReader wrapped around an S3 byte-range stream."""
-    client = _get_boto3_client()
-    settings = get_settings()
-    # Wrapping it pools many tiny reads (which `pypdf` performs heavily) into fewer larger HTTP requests.
-    return io.BufferedReader(S3File(client, settings.b2_bucket_name, r2_key), buffer_size=1 * 1024 * 1024)
