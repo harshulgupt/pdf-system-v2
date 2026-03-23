@@ -100,18 +100,14 @@ class UploadService:
     def _process_upload(self, upload) -> None:
         r2_key = f"uploads/{upload.id}.pdf"
         
-        from app.services.storage import download_file_to_disk
-        import os
-        
-        local_path = f"/tmp/{upload.id}.pdf"
+        from app.services.storage import get_s3_file_stream
         
         try:
-            # Download file to disk first.
-            # This is much faster for large files than S3 byte-range streaming 
-            # because `pypdf` makes many random reads/seeks.
-            download_file_to_disk(r2_key, local_path)
+            # Stream byte-ranges directly from S3 
+            # This avoids OOMs and ephemeral disk limit issues for files > 1GB
+            s3_stream = get_s3_file_stream(r2_key)
             
-            reader = pypdf.PdfReader(local_path)
+            reader = pypdf.PdfReader(s3_stream, strict=False)
             total_pages = len(reader.pages)
 
             if total_pages == 0:
@@ -120,6 +116,8 @@ class UploadService:
             # Semantic text chunking (5 pages per semantic chunk to maintain context boundaries)
             pages_per_chunk = 5
             chunk_idx = 0
+
+            import gc
 
             for start_page in range(0, total_pages, pages_per_chunk):
                 end_page = min(start_page + pages_per_chunk, total_pages)
@@ -143,15 +141,18 @@ class UploadService:
                 # Create the semantic chunk record mapped to this block of text
                 chunk_record = self.upload_repo.save_chunk_record(upload.id, chunk_idx, r2_key)
                 self.search_repo.save_extracted_text(chunk_record.id, text)
+                
                 chunk_idx += 1
                 
+                # Proactively free memory to survive 512MB RAM constraints on 2GB+ files
+                if chunk_idx % 20 == 0:
+                    del raw_parts
+                    del text
+                    gc.collect()
+                
         finally:
-            # Always clean up the local file to preserve ephemeral disk space
-            if os.path.exists(local_path):
-                try:
-                    os.remove(local_path)
-                except Exception:
-                    pass
+            # We no longer need to clean up local paths as we rely on the S3 buffer stream
+            pass
 
     def get_status(self, upload_id: str) -> dict:
         upload = self.upload_repo.get_upload(upload_id)
